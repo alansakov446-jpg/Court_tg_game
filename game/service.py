@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 from datetime import timedelta
 
@@ -6,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 
-from ai.gemini import AIUnavailable
+from ai.gemini import AIUnavailable, cause
 from ai.host import create_case, plan_action, speak
 from db.models import Economy, Evidence, Game, Player, Role, Statement, utcnow
 from game.rules import (
@@ -17,6 +18,10 @@ from game.rules import (
     fingerprint,
     role_specs,
 )
+
+# AI failures are logged here with a technical cause only: no keys, prompts,
+# provider answers, chat text, case content or player names.
+log = logging.getLogger("court.game")
 
 
 def change(game, **values):
@@ -147,6 +152,13 @@ class Court:
         )
         self.db.add(game)
         await self.db.flush()
+        # Makes the wait for generation visible: /game opens a lobby, it does not start a case.
+        log.info(
+            "Lobby opened game=%s requested_bots=%d case_due_in=%ds (/startnow skips the wait)",
+            game.id,
+            bots,
+            int((game.deadline - now).total_seconds()),
+        )
         # Payload includes both chat and game; old invitations cannot join a different game.
         link = f"https://t.me/{self.username}?start=join_{game.chat_id}_{game.id}"
         markup = InlineKeyboardMarkup(
@@ -232,8 +244,21 @@ class Court:
                 case = await create_case(self.ai, [s[0] for s in specs], previous)
             digest = fingerprint(case["crime"])
             if await self.db.scalar(select(Game.id).where(Game.case_hash == digest)):
-                raise AIUnavailable("Получилось повторное дело")
-        except (AIUnavailable, TimeoutError):
+                log.warning(
+                    "Generated case duplicates an existing one game=%s; retry in 60s",
+                    game.id,
+                )
+                raise AIUnavailable(
+                    "Получилось повторное дело", summary="duplicate_case"
+                )
+        except (AIUnavailable, TimeoutError) as exc:
+            # The room survives, so this must not disappear from the logs silently.
+            log.error(
+                "New case was not created game=%s players=%d reason=%s; retry in 60s",
+                game.id,
+                len(people),
+                cause(exc),
+            )
             game.deadline = utcnow() + timedelta(seconds=60)
             game.last_notice = utcnow()
             await self.send(
@@ -259,6 +284,12 @@ class Court:
         for side in ("prosecution", "defense"):
             self.db.add(Economy(game_id=game.id, side=side, balance=50))
         game.case_hash, game.status = digest, "running"
+        log.info(
+            "Case created game=%s evidence=%d roles=%d",
+            game.id,
+            len(case["evidence"]),
+            len(roles),
+        )
         change(
             game,
             crime=case["crime"],
@@ -433,8 +464,18 @@ class Court:
                 )
             valid = review.get("valid") if isinstance(review, dict) else None
             if not isinstance(valid, bool):
+                log.warning(
+                    "Objection review returned no verdict game=%s answer=%s",
+                    game.id,
+                    type(review).__name__,
+                )
                 valid = None
-        except (AIUnavailable, TimeoutError):
+        except (AIUnavailable, TimeoutError) as exc:
+            log.warning(
+                "Objection review unavailable game=%s reason=%s; the judge decides without a hint",
+                game.id,
+                cause(exc),
+            )
             valid = None
         change(game, objection={"applicant": p.id, "valid": valid})
         await self.public(
@@ -553,7 +594,14 @@ class Court:
         try:
             async with asyncio.timeout(15):
                 text = await speak(self.ai, role.title, await self.context(game, role))
-        except (AIUnavailable, TimeoutError):
+        except (AIUnavailable, TimeoutError) as exc:
+            log.warning(
+                "Bot speech fallback game=%s phase=%s role=%s reason=%s",
+                game.id,
+                game.phase,
+                getattr(role, "code", None),
+                cause(exc),
+            )
             text = "Прошу оценивать только представленные факты. Новых сведений у меня нет."
         if game.phase == "final":
             text = text[:200]
@@ -647,8 +695,16 @@ class Court:
             elif kind == "object":
                 # The procedural engine permits AI parties, but requires a prior statement.
                 await self.objection(game, p, allow_bot=True)
-        except (AIUnavailable, TimeoutError, ValueError):
-            return  # An optional action must never block the hearing.
+        except (AIUnavailable, TimeoutError, ValueError) as exc:
+            # An optional action must never block the hearing; the reason still goes to the log.
+            log.warning(
+                "Optional AI action skipped game=%s phase=%s role=%s reason=%s",
+                game.id,
+                game.phase,
+                getattr(role, "code", None),
+                cause(exc),
+            )
+            return
 
     async def ai_decision(self, game, p):
         r = await self.role(p)
@@ -662,8 +718,21 @@ class Court:
                     json_mode=True,
                 )
             result = answer.get("vote")
+            if result not in ("guilty", "innocent"):
+                log.warning(
+                    "AI vote was unusable game=%s role=%s answer=%s; voting not proven",
+                    game.id,
+                    getattr(r, "code", None),
+                    type(answer).__name__,
+                )
             return result if result in ("guilty", "innocent") else "innocent"
-        except (AIUnavailable, TimeoutError, AttributeError):
+        except (AIUnavailable, TimeoutError, AttributeError) as exc:
+            log.warning(
+                "AI vote fallback game=%s role=%s reason=%s; voting not proven",
+                game.id,
+                getattr(r, "code", None),
+                cause(exc),
+            )
             return "innocent"
 
     async def tick(self, game):
@@ -732,8 +801,10 @@ class Court:
                     await self.public(
                         game, f"Цена экспертизы изменилась, теперь {value}$."
                     )
-            except (AIUnavailable, TimeoutError, AttributeError):
-                pass
+            except (AIUnavailable, TimeoutError, AttributeError) as exc:
+                log.warning(
+                    "Expertise price kept game=%s reason=%s", game.id, cause(exc)
+                )
         p = await self.by_code(game, game.state["speaker"])
         if not p:
             return

@@ -1,7 +1,11 @@
 import json
+import logging
 
-from ai.gemini import AIUnavailable
+from ai.gemini import AIUnavailable, summarize
 from game.rules import validate_case
+
+log = logging.getLogger("court.ai.host")
+ATTEMPTS = 3
 
 
 async def create_case(ai, codes, previous):
@@ -19,12 +23,39 @@ async def create_case(ai, codes, previous):
         + "\nПрошлые сюжеты: "
         + json.dumps(previous, ensure_ascii=False)
     )
-    for _ in range(3):
+    rejections = []
+    for attempt in range(1, ATTEMPTS + 1):
         try:
-            return validate_case(await ai.generate(prompt, json_mode=True), codes)
-        except ValueError:
+            case = validate_case(await ai.generate(prompt, json_mode=True), codes)
+            log.info(
+                "Case draft accepted attempt=%d/%d roles=%d evidence=%d",
+                attempt,
+                ATTEMPTS,
+                len(codes),
+                len(case["evidence"]),
+            )
+            return case
+        except ValueError as exc:
+            # validate_case raises short local reasons; the draft itself is not logged.
+            rejections.append(str(exc))
+            log.warning(
+                "Case draft rejected attempt=%d/%d roles=%d reason=%s",
+                attempt,
+                ATTEMPTS,
+                len(codes),
+                exc,
+            )
             prompt += "\nИсправь структуру: заполни все роли и соблюдай схему JSON."
-    raise AIUnavailable("ИИ не смог подготовить корректное дело")
+    log.error(
+        "Case generation failed: %d invalid drafts, roles=%d reasons=%s",
+        ATTEMPTS,
+        len(codes),
+        ", ".join(rejections),
+    )
+    raise AIUnavailable(
+        "ИИ не смог подготовить корректное дело",
+        summary="invalid_case_drafts=" + summarize(rejections),
+    )
 
 
 async def speak(ai, role, context):
@@ -61,4 +92,11 @@ async def plan_action(ai, role, context, witnesses, balance, price):
         ),
         json_mode=True,
     )
-    return result if isinstance(result, dict) else {"action": "none"}
+    if not isinstance(result, dict):
+        # The answer type is technical; the answer itself is never logged.
+        log.warning(
+            "Action plan is not an object (got %s); treated as none",
+            type(result).__name__,
+        )
+        return {"action": "none"}
+    return result

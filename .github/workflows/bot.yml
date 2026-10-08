@@ -36,13 +36,48 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: alembic upgrade head
       - name: Poll Telegram updates
-        run: python main.py
+        # shell: bash enables pipefail, so a crashed poller still fails this step.
+        shell: bash
+        run: python main.py 2>&1 | tee poll.log
       - name: Save Telegram offset
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .offset
           key: court-offset-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Report AI diagnostics
+        # A green run does not mean the AI worked: failures are logged, not raised.
+        if: always()
+        shell: bash
+        run: |
+          [ -f poll.log ] || exit 0
+          lines=$(grep -E 'court\.(ai|game)' poll.log | grep -E ' (WARNING|ERROR) ' | tail -n 40 || true)
+          total=$(printf '%s' "$lines" | grep -c . || true)
+          {
+            echo '## AI diagnostics'
+            echo ''
+            if [ "$total" -eq 0 ]; then
+              echo 'No AI warnings or errors in this polling window.'
+              echo 'A case creation, if any, is confirmed by a `Case created game=...` line in the log.'
+            else
+              echo "Found $total AI warning/error line(s) in this run:"
+              echo ''
+              echo '```'
+              printf '%s\n' "$lines"
+              echo '```'
+            fi
+            echo ''
+            echo 'Logged: model, HTTP status, provider error code and message (keys redacted),'
+            echo 'timeout class, JSON validation reason. Prompts, answers and player data are never logged.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload poller log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poller-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: poll.log
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Explain normal poller exit
         if: success()
         run: |
