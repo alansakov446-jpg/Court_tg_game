@@ -1,4 +1,4 @@
-"""Single worker: durable games, bounded long-polling, advisory lock, cached offset."""
+"""Single worker: durable games, long-polling, advisory lock, and cached offset."""
 
 import asyncio
 import logging
@@ -50,6 +50,11 @@ async def run():
                 offset = int(OFFSET.read_text()) if OFFSET.exists() else 0
             except ValueError:
                 offset = 0
+            log.info(
+                "Polling started as @%s (%s)",
+                username,
+                f"{duration}s limit" if duration else "continuous",
+            )
             while time.monotonic() < end:
                 # A lost lock connection must terminate the worker, not silently reconnect.
                 if lock.invalidated:
@@ -108,6 +113,8 @@ async def run():
                 limit=1,
                 allowed_updates=["message", "callback_query"],
             )
+            if duration:
+                log.info("Polling stopped after configured %s-second limit", duration)
     finally:
         await bot.session.close()
         await ai.close()
