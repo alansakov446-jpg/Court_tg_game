@@ -26,6 +26,22 @@ def save_offset(value):
     temporary.replace(OFFSET)
 
 
+def summarize(markdown):
+    """Append a visible note to the GitHub Actions job summary, if running there.
+
+    A green checkmark alone says nothing about whether the bot actually polled
+    Telegram; the summary makes each shift self-describing in the run UI.
+    """
+    path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(markdown.rstrip() + "\n")
+    except OSError:
+        pass
+
+
 async def run():
     for name in ("BOT_TOKEN", "DATABASE_URL", "GEMINI_API"):
         if not os.getenv(name):
@@ -43,6 +59,10 @@ async def run():
             acquired = await lock.scalar(text("SELECT pg_try_advisory_lock(742190018)"))
             if not acquired:
                 log.info("Another worker is active; exiting")
+                summarize(
+                    "⚠️ Another worker holds the advisory lock — this run did "
+                    "**not** poll Telegram."
+                )
                 return
             username = (await bot.get_me()).username
             await bot.delete_webhook(drop_pending_updates=False)
@@ -50,6 +70,12 @@ async def run():
                 offset = int(OFFSET.read_text()) if OFFSET.exists() else 0
             except ValueError:
                 offset = 0
+            if not OFFSET.exists():
+                # Persist even before the first update so the workflow's
+                # cache/save step always has a file and an idle shift still
+                # carries the offset forward.
+                save_offset(offset)
+            processed = 0
             log.info(
                 "Polling started as @%s (%s)",
                 username,
@@ -75,6 +101,7 @@ async def run():
                             await dp.feed_update(bot, update, court=court)
                         offset = update.update_id + 1
                         save_offset(offset)  # Only after transaction commit.
+                        processed += 1
                     async with sessions() as session:
                         ids = list(
                             (
@@ -114,7 +141,20 @@ async def run():
                 allowed_updates=["message", "callback_query"],
             )
             if duration:
-                log.info("Polling stopped after configured %s-second limit", duration)
+                log.info(
+                    "Polling stopped after %s-second limit: processed %d update(s), next offset %d",
+                    duration,
+                    processed,
+                    offset,
+                )
+            summarize(
+                f"✅ Bot **@{username}** polled Telegram for up to {duration} s: "
+                f"processed **{processed}** update(s), next offset `{offset}`.\n\n"
+                "If this says 0 updates but you wrote to the bot: check that "
+                "BOT_TOKEN belongs to this @username, that you wrote while the "
+                "shift was running, and that no local `python main.py` is "
+                "intercepting updates."
+            )
     finally:
         await bot.session.close()
         await ai.close()
