@@ -4,7 +4,12 @@ on:
   push:
     branches: [main]
   schedule:
-    # GitHub Actions supports a minimum interval of 5 minutes, not */1.
+    # Fallback heartbeat only: GitHub's minimum cron interval is 5 minutes, and
+    # scheduled runs are frequently delayed or skipped (especially in the first
+    # hours after the workflow lands on the default branch). The reliable
+    # mechanism is the "Start the next shift" step below: every successful run
+    # re-dispatches this workflow, so shifts hand over with only runner
+    # start-up (~30–60 s) in between.
     - cron: '*/5 * * * *'
 permissions:
   contents: read
@@ -15,11 +20,16 @@ jobs:
   bot:
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: write # GITHUB_TOKEN may trigger workflow_dispatch (documented exception)
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       GEMINI_API: ${{ secrets.GEMINI_API }}
-      RUN_SECONDS: '260'
+      # Cover the whole cron interval plus start-up overhead; the concurrency
+      # group queues the next shift, so coverage stays near-continuous.
+      RUN_SECONDS: '350'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,8 +42,9 @@ jobs:
           path: .offset
           key: court-offset-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: court-offset-
+      # Unit tests intentionally live in tests.yml (push/PR) only: running them
+      # here would lengthen the offline window between shifts.
       - run: pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
       - run: alembic upgrade head
       - name: Poll Telegram updates
         run: python main.py
@@ -43,12 +54,14 @@ jobs:
         with:
           path: .offset
           key: court-offset-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Explain normal poller exit
-        if: success()
+      - name: Start the next shift
+        if: success() && github.ref == 'refs/heads/main'
+        env:
+          DISPATCH_TOKEN: ${{ github.token }}
         run: |
-          {
-            echo '## Telegram polling window completed'
-            echo ''
-            echo 'This run polls Telegram for up to 260 seconds and then exits successfully.'
-            echo 'The next run is started by the 5-minute schedule, a push to main, or manual dispatch.'
-          } >> "$GITHUB_STEP_SUMMARY"
+          curl -sfL --retry 3 --retry-delay 5 --retry-all-errors -X POST \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/bot.yml/dispatches" \
+            -d '{"ref":"main"}'
+          echo "Next shift dispatched."
