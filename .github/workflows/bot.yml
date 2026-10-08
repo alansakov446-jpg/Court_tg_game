@@ -1,0 +1,42 @@
+name: Court bot
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions supports a minimum interval of 5 minutes, not */1.
+    - cron: '*/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: court-telegram-poller
+  cancel-in-progress: false
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API: ${{ secrets.GEMINI_API }}
+      RUN_SECONDS: '260'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Restore Telegram offset
+        uses: actions/cache/restore@v4
+        with:
+          path: .offset
+          key: court-offset-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: court-offset-
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: alembic upgrade head
+      - run: python main.py
+      - name: Save Telegram offset
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .offset
+          key: court-offset-${{ github.run_id }}-${{ github.run_attempt }}
