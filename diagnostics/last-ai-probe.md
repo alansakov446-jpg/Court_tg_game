@@ -15,19 +15,23 @@ court.probe INFO Probe start keys_configured=5 models=gemini-3.8-flash,gemini-3.
 court.probe INFO Shape probe start configs=6 models=gemini-3.8-flash,gemini-3.5-flash-lite
 court.probe INFO Shape probe model=gemini-3.8-flash config=bare_800 OK
 court.probe INFO Shape probe model=gemini-3.8-flash config=max6000 OK
-court.probe INFO Shape probe model=gemini-3.8-flash config=mime OK
+court.probe WARNING Shape probe model=gemini-3.8-flash config=mime http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
 court.probe INFO Shape probe model=gemini-3.8-flash config=think0 OK
-court.probe INFO Shape probe model=gemini-3.8-flash config=think1024 OK
-court.probe INFO Shape probe model=gemini-3.8-flash config=full_case OK
+court.probe WARNING Shape probe model=gemini-3.8-flash config=think1024 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
+court.probe WARNING Shape probe model=gemini-3.8-flash config=full_case http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=bare_800 OK
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=max6000 OK
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=mime OK
 court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=think0 http=400 INVALID_ARGUMENT message='Request contains an invalid argument.'
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=think1024 OK
 court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=full_case http=400 INVALID_ARGUMENT message='Request contains an invalid argument.'
-court.ai.host INFO Case draft accepted attempt=1/3 roles=9 evidence=6
-court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=442
-court.probe INFO Probe done result=accepted elapsed=40.3s
+court.ai INFO Gemini attempt failed model=gemini-3.8-flash key=#0 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa' cooldown=60s prompt_chars=918
+court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#1 http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' prompt_chars=918
+court.ai INFO Gemini slim config accepted model=gemini-3.5-flash-lite key=#0
+court.ai.host WARNING Case draft rejected attempt=1/3 roles=9 reason=Нет описания дела
+court.ai.host INFO Case draft accepted attempt=2/3 roles=9 evidence=6
+court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=300
+court.probe INFO Probe done result=accepted elapsed=40.7s
 ```
 ## Recent Court bot runs (sanitized excerpts)
 
