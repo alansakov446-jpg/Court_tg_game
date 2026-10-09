@@ -153,6 +153,41 @@ cooldown. Сетевые ошибки, невалидный JSON, пустые �
 с пустым делом. Если ИИ недоступен уже во время игры, бот использует нейтральную реплику,
 голосует за недоказанность, пропускает необязательные действия; фазы продолжаются.
 
+### Диагностика ИИ в логах
+
+Отказ ИИ **не** делает запуск workflow красным: зал живёт дальше, поэтому причина пишется в лог.
+Логгеры: `court.ai` (каскад Gemini), `court.ai.host` (проверка черновиков дела),
+`court.game` (последствия для конкретной игры).
+
+Каждая неудачная попытка — одна строка WARNING: модель, индекс ключа (`key=#0`, не сам ключ),
+HTTP-статус и код ошибки провайдера (`http=429 body_not_json cooldown=60s`,
+`http=400 INVALID_ARGUMENT message='API key not valid: [redacted]'`), класс таймаута
+(`timeout=ReadTimeout limit=25s`), сетевая ошибка (`network=ConnectError`), причина
+непригодного ответа (`blocked=SAFETY`, `no_parts finish=MAX_TOKENS`, `empty_text`) или ошибка
+валидации JSON (`invalid_json=JSONDecodeError answer_chars=8`). HTTP 429 пишется уровнем INFO,
+потому что каскад продолжается другим ключом.
+
+Исчерпание каскада — одна строка ERROR `Gemini exhausted ... cause=<сводка>`, где повторы
+схлопнуты (`http=429 x10`) и ограничены 600 символами; та же сводка передаётся в
+`AIUnavailable.summary`. Отдельно логируются: `Case draft rejected attempt=1/3 ... reason=Нужно 5–7 улик`
+(причины локальные, из `validate_case`), `New case was not created game=7 players=3 reason=...; retry in 60s`,
+а при успехе — `Case created game=7 evidence=6 roles=9`.
+
+В лог **не** попадают: API-ключ (он ещё и вырезается из сообщения провайдера), тело запроса,
+промпт (только `prompt_chars`), тексты ответов и сгенерированное дело, имена игроков,
+содержимое чата и `truth`.
+
+Порядок строк при создании дела: `Lobby opened game=7 requested_bots=2 case_due_in=150s`
+(команда `/game` только открывает зал на 2:30, генерация начинается по дедлайну или сразу
+после `/startnow`) → `Case draft accepted attempt=1/3` или `Case draft rejected ...` →
+`Case created game=7 evidence=6 roles=9`. Если последней строки нет, а `New case was not created`
+есть — дело не создано, причина указана в `reason=`.
+
+Workflow `.github/workflows/bot.yml` пишет вывод поллера в `poll.log` (игнорируется git),
+загружает его артефактом `poller-log-<run>-<attempt>` и добавляет в сводку запуска блок
+**AI diagnostics** со всеми строками WARNING/ERROR от `court.ai`/`court.game`. Пустой блок
+означает, что за окно опроса сбоев ИИ не было.
+
 Нормализованный SHA-256 описания уникален в БД: **точные повторы отвергаются**. Последние
 100 сюжетов передаются генератору с запретом смысловых повторов. Это не строгая гарантия
 семантической уникальности всех возможных преступлений; для неё нужна дополнительная проверка.
@@ -173,12 +208,12 @@ cooldown. Сетевые ошибки, невалидный JSON, пустые �
 
 ```text
 main.py                 polling → транзакция апдейта → offset → игровые тики
-ai/gemini.py            каскад и cooldown
+ai/gemini.py            каскад, cooldown и безопасная диагностика отказов
 ai/host.py              генерация дела, речь, выбор действия
 game/                  правила, команды, лобби, фазы, экономика
 db/models.py            games, players, roles, evidence, statements, economy
 alembic/                версионируемая схема и уникальный индекс открытого зала
-.github/workflows/      bot.yml — периодический запуск; tests.yml — CI на PostgreSQL 16
+.github/workflows/      bot.yml — периодический запуск и сводка AI diagnostics; tests.yml — CI на PostgreSQL 16
 ```
 
 ```bash

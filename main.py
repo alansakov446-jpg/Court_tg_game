@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError, TelegramConflictError
 from sqlalchemy import select, text
 
-from ai.gemini import Gemini
+from ai.gemini import Gemini, cause
 from db.models import Game
 from db.session import connect
 from game.handlers import router
@@ -92,10 +92,9 @@ async def run():
                                 await Court(session, bot, ai, username).tick(game)
                         except Exception as exc:  # noqa: BLE001 — isolate one broken game from other rooms
                             # Do not log provider URLs, tokens, SQL parameters or private game context.
+                            # cause() adds only the technical AI summary when there is one.
                             log.error(
-                                "Game tick failed (%s), game=%s",
-                                type(exc).__name__,
-                                gid,
+                                "Game tick failed game=%s reason=%s", gid, cause(exc)
                             )
                 except TelegramConflictError:
                     raise RuntimeError(

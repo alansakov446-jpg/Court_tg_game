@@ -68,3 +68,117 @@ class CascadeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AIUnavailable):
             await ai.generate("test")
         await ai.close()
+
+
+class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    """A failure must be explainable from the logs, without leaking keys or content."""
+
+    def client(self, handler):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def test_provider_error_is_logged_and_key_is_redacted(self):
+        def handler(_):
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": 400,
+                        "status": "INVALID_ARGUMENT",
+                        "message": "API key not valid: secret",
+                    }
+                },
+            )
+
+        ai = Gemini("secret", client=self.client(handler))
+        with (
+            self.assertLogs("court.ai", level="WARNING") as logs,
+            self.assertRaises(AIUnavailable) as cm,
+        ):
+            await ai.generate("test")
+        output = "\n".join(logs.output)
+        self.assertIn("http=400 INVALID_ARGUMENT", output)
+        self.assertIn("model=gemini-2.5-flash", output)
+        self.assertIn("[redacted]", output)
+        self.assertNotIn("secret", output)
+        self.assertIn("http=400 INVALID_ARGUMENT", cm.exception.summary)
+        self.assertNotIn("secret", cm.exception.summary)
+        await ai.close()
+
+    async def test_timeout_is_logged_with_model_and_limit(self):
+        def handler(_):
+            raise httpx.ReadTimeout("read timed out")
+
+        ai = Gemini("a", client=self.client(handler))
+        with (
+            self.assertLogs("court.ai", level="WARNING") as logs,
+            self.assertRaises(AIUnavailable) as cm,
+        ):
+            await ai.generate("test", json_mode=True)
+        output = "\n".join(logs.output)
+        self.assertIn("timeout=ReadTimeout", output)
+        self.assertIn("limit=5s", output)
+        self.assertIn("gemini-2.5-flash-lite", output)
+        self.assertIn("json_mode=True", output)
+        self.assertEqual(cm.exception.summary, "timeout=ReadTimeout x2")
+        await ai.close()
+
+    async def test_invalid_json_logs_length_but_not_the_answer(self):
+        ai = Gemini("a", client=self.client(lambda _: success("not json")))
+        with (
+            self.assertLogs("court.ai", level="WARNING") as logs,
+            self.assertRaises(AIUnavailable),
+        ):
+            await ai.generate("test", json_mode=True)
+        output = "\n".join(logs.output)
+        self.assertIn("invalid_json=JSONDecodeError", output)
+        self.assertIn("answer_chars=8", output)
+        self.assertNotIn("not json", output)
+        await ai.close()
+
+    async def test_blocked_and_truncated_answers_are_named(self):
+        answers = [
+            httpx.Response(200, json={"promptFeedback": {"blockReason": "SAFETY"}}),
+            httpx.Response(
+                200,
+                json={"candidates": [{"finishReason": "MAX_TOKENS", "content": {}}]},
+            ),
+        ]
+        calls = []
+
+        def handler(_):
+            calls.append(1)
+            return answers[0] if len(calls) == 1 else answers[1]
+
+        ai = Gemini("a", client=self.client(handler))
+        with (
+            self.assertLogs("court.ai", level="WARNING") as logs,
+            self.assertRaises(AIUnavailable) as cm,
+        ):
+            await ai.generate("test")
+        output = "\n".join(logs.output)
+        self.assertIn("blocked=SAFETY", output)
+        self.assertIn("no_parts finish=MAX_TOKENS", output)
+        self.assertIn("blocked=SAFETY", cm.exception.summary)
+        await ai.close()
+
+    async def test_cooldown_exhaustion_reports_cause_without_requests(self):
+        calls = []
+
+        def handler(_):
+            calls.append(1)
+            return httpx.Response(429)
+
+        ai = Gemini("a,b", client=self.client(handler))
+        with self.assertRaises(AIUnavailable):
+            await ai.generate("test")
+        self.assertEqual(len(calls), 4)
+        calls.clear()
+        with (
+            self.assertLogs("court.ai", level="ERROR") as logs,
+            self.assertRaises(AIUnavailable) as cm,
+        ):
+            await ai.generate("test")
+        self.assertEqual(calls, [])  # cooldowns prevent pointless retries
+        self.assertEqual(cm.exception.summary, "all_keys_in_cooldown")
+        self.assertIn("attempts=0", "\n".join(logs.output))
+        await ai.close()
