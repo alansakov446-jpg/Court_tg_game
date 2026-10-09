@@ -26,19 +26,18 @@ court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=think0 http=4
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=think1024 OK
 court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=full_case http=400 INVALID_ARGUMENT message='Request contains an invalid argument.'
 court.ai INFO Gemini attempt failed model=gemini-3.8-flash key=#0 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa' cooldown=60s prompt_chars=918
-court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#1 http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' prompt_chars=918
-court.ai INFO Gemini slim config accepted model=gemini-3.5-flash-lite key=#0
 court.ai.host WARNING Case draft rejected attempt=1/3 roles=9 reason=Неверная видимость
-court.ai.host WARNING Case draft rejected attempt=2/3 roles=9 reason=Неверная видимость
-court.ai.host INFO Case draft accepted attempt=3/3 roles=9 evidence=6
-court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=299
-court.probe INFO Probe done result=accepted elapsed=18.1s
+court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#1 http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' prompt_chars=977
+court.ai INFO Gemini slim config accepted model=gemini-3.5-flash-lite key=#0
+court.ai.host INFO Case draft accepted attempt=2/3 roles=9 evidence=6
+court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=492
+court.probe INFO Probe done result=accepted elapsed=21.9s
 ```
 ## Recent Court bot runs (sanitized excerpts)
 
 | run | event | conclusion | created |
 |---|---|---|---|
-| 37977906750 | push |  | 2026-10-09T19:06:12Z |
+| 37977906750 | push | success | 2026-10-09T19:06:12Z |
 | 37968090703 | workflow_dispatch | success | 2026-10-09T17:41:48Z |
 | 37967978905 | push | success | 2026-10-09T17:40:50Z |
 | 37964438784 | schedule | success | 2026-10-09T17:10:57Z |
