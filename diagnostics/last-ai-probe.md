@@ -26,36 +26,49 @@ court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=think0 http=4
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=think1024 OK
 court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=full_case http=400 INVALID_ARGUMENT message='Request contains an invalid argument.'
 court.ai INFO Gemini attempt failed model=gemini-3.8-flash key=#0 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa' cooldown=60s prompt_chars=918
-court.ai.host WARNING Case draft rejected attempt=1/3 roles=9 reason=Неверная видимость
-court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#1 http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' prompt_chars=977
+court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#1 http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' prompt_chars=918
 court.ai INFO Gemini slim config accepted model=gemini-3.5-flash-lite key=#0
-court.ai.host INFO Case draft accepted attempt=2/3 roles=9 evidence=6
-court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=492
-court.probe INFO Probe done result=accepted elapsed=21.9s
+court.ai.host INFO Case draft accepted attempt=1/3 roles=9 evidence=6
+court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=493
+court.probe INFO Probe done result=accepted elapsed=12.8s
 ```
 ## Recent Court bot runs (sanitized excerpts)
 
 | run | event | conclusion | created |
 |---|---|---|---|
+| 37978841310 | push | success | 2026-10-09T19:14:18Z |
 | 37977906750 | push | success | 2026-10-09T19:06:12Z |
 | 37968090703 | workflow_dispatch | success | 2026-10-09T17:41:48Z |
 | 37967978905 | push | success | 2026-10-09T17:40:50Z |
 | 37964438784 | schedule | success | 2026-10-09T17:10:57Z |
 | 37918597018 | schedule | success | 2026-10-09T10:36:04Z |
-| 37877914822 | schedule | success | 2026-10-09T03:08:46Z |
+
+### run 37978841310
+```
+bot	Poll Telegram updates	2026-10-09T19:14:43.3725953Z 2026-10-09 19:14:43,372 court INFO Polling started as @VsemVstatSudIdet_bot (260s limit)
+bot	Poll Telegram updates	2026-10-09T19:19:05.2321995Z 2026-10-09 19:19:05,231 court INFO Polling stopped after configured 260-second limit
+bot	Report AI diagnostics	2026-10-09T19:19:06.4244444Z ^[[36;1mlife=$(grep -E 'Lobby opened|Case draft accepted|Case created|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram' poll.log || true)^[[0m
+bot	Report AI diagnostics	2026-10-09T19:19:06.4252739Z ^[[36;1m  echo 'A started party is confirmed by a `Case created game=...` line above.'^[[0m
+```
 
 ### run 37977906750
 ```
-(no matching lines)
+bot	Poll Telegram updates	2026-10-09T19:06:32.2691056Z 2026-10-09 19:06:32,268 court INFO Polling started as @VsemVstatSudIdet_bot (260s limit)
+bot	Poll Telegram updates	2026-10-09T19:10:54.9614042Z 2026-10-09 19:10:54,960 court INFO Polling stopped after configured 260-second limit
+bot	Report AI diagnostics	2026-10-09T19:10:56.1139310Z ^[[36;1mlife=$(grep -E 'Lobby opened|Case draft accepted|Case created|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram' poll.log || true)^[[0m
+bot	Report AI diagnostics	2026-10-09T19:10:56.1145123Z ^[[36;1m  echo 'A started party is confirmed by a `Case created game=...` line above.'^[[0m
 ```
 
 ### run 37968090703
 ```
-(no matching lines)
+bot	UNKNOWN STEP	2026-10-09T17:46:12.5888243Z 2026-10-09 17:46:12,588 court INFO Polling started as @VsemVstatSudIdet_bot (260s limit)
+bot	UNKNOWN STEP	2026-10-09T17:50:33.8477248Z 2026-10-09 17:50:33,847 court INFO Polling stopped after configured 260-second limit
+bot	UNKNOWN STEP	2026-10-09T17:50:35.4861769Z ^[[36;1m    echo 'A case creation, if any, is confirmed by a `Case created game=...` line in the log.'^[[0m
 ```
 
 ### run 37967978905
 ```
+bot	UNKNOWN STEP	2026-10-09T17:41:21.8714536Z 2026-10-09 17:41:21,871 court INFO Polling started as @VsemVstatSudIdet_bot (260s limit)
 bot	UNKNOWN STEP	2026-10-09T17:44:33.7141754Z 2026-10-09 17:44:33,713 court.game INFO Lobby opened game=5 requested_bots=0 case_due_in=150s (/startnow skips the wait)
 bot	UNKNOWN STEP	2026-10-09T17:45:08.7750356Z 2026-10-09 17:45:08,774 court.game INFO Lobby opened game=6 requested_bots=5 case_due_in=150s (/startnow skips the wait)
 bot	UNKNOWN STEP	2026-10-09T17:45:37.9378571Z 2026-10-09 17:45:37,937 court.ai WARNING Gemini attempt failed model=gemini-2.5-flash key=#0 http=404 NOT_FOUND message='This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash for the latest features and improvements. We recommend you to use the Int' prompt_chars=850
@@ -70,20 +83,19 @@ bot	UNKNOWN STEP	2026-10-09T17:45:39.3816048Z 2026-10-09 17:45:39,381 court.ai W
 bot	UNKNOWN STEP	2026-10-09T17:45:39.5351144Z 2026-10-09 17:45:39,534 court.ai WARNING Gemini attempt failed model=gemini-2.5-flash-lite key=#4 http=404 NOT_FOUND message='This model models/gemini-2.5-flash-lite is no longer available to new users. Please update your code to use models/gemini-3.5-flash-lite for the latest features and improvements. We recommend you to u' prompt_chars=850
 bot	UNKNOWN STEP	2026-10-09T17:45:39.5357164Z 2026-10-09 17:45:39,534 court.ai ERROR Gemini exhausted models=gemini-2.5-flash,gemini-2.5-flash-lite attempts=10 json_mode=True prompt_chars=850 elapsed=1.8s cause=http=404 NOT_FOUND message='This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash for the latest features and improvements. We recommend you to use the Int' x5; http=404 NOT_FOUND message='This model models/gemini-2.5-flash-lite is no longer available to new users. Please update your code to use models/gemini-3.5-flash-lite for the latest features and improvements. We recommend you to u' x5
 bot	UNKNOWN STEP	2026-10-09T17:45:39.5363607Z 2026-10-09 17:45:39,534 court.game ERROR New case was not created game=6 players=1 reason=AIUnavailable: http=404 NOT_FOUND message='This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash for the latest features and improvements. We recommend you to use the Int' x5; http=404 NOT_FOUND message='This model models/gemini-2.5-flash-lite is no longer available to new users. Please update your code to use models/gemini-3.5-flash-lite for the latest features and improvements. We recommend you to u' x5; retry in 60s
+bot	UNKNOWN STEP	2026-10-09T17:45:41.2709299Z 2026-10-09 17:45:41,270 court INFO Polling stopped after configured 260-second limit
+bot	UNKNOWN STEP	2026-10-09T17:45:43.0416215Z ^[[36;1m    echo 'A case creation, if any, is confirmed by a `Case created game=...` line in the log.'^[[0m
 ```
 
 ### run 37964438784
 ```
-(no matching lines)
+bot	UNKNOWN STEP	2026-10-09T17:11:24.3718315Z 2026-10-09 17:11:24,371 court INFO Polling started as @VsemVstatSudIdet_bot (260s limit)
+bot	UNKNOWN STEP	2026-10-09T17:15:46.4101198Z 2026-10-09 17:15:46,409 court INFO Polling stopped after configured 260-second limit
 ```
 
 ### run 37918597018
 ```
-(no matching lines)
-```
-
-### run 37877914822
-```
-(no matching lines)
+bot	UNKNOWN STEP	2026-10-09T10:36:27.5237060Z 2026-10-09 10:36:27,523 court INFO Polling started as @VsemVstatSudIdet_bot (260s limit)
+bot	UNKNOWN STEP	2026-10-09T10:40:51.8605905Z 2026-10-09 10:40:51,860 court INFO Polling stopped after configured 260-second limit
 ```
 
