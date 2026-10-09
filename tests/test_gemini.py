@@ -37,6 +37,51 @@ class CascadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 6)
         await ai.close()
 
+    async def test_server_error_cools_the_whole_model(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.path)
+            if f"/{Gemini.models[0]}:" in request.url.path:
+                return httpx.Response(
+                    503,
+                    json={
+                        "error": {
+                            "status": "UNAVAILABLE",
+                            "message": "high demand",
+                        }
+                    },
+                )
+            return success()
+
+        ai = Gemini(
+            "a,b,c", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        self.assertEqual(await ai.generate("test"), "hello")
+        # One 503 is enough: the other flash keys are skipped, lite answers.
+        self.assertEqual(len(calls), 2)
+        self.assertIn(f"/{Gemini.models[0]}:", calls[0])
+        self.assertIn(f"/{Gemini.models[1]}:", calls[1])
+        await ai.close()
+
+    async def test_timeout_cools_the_whole_model(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.path)
+            if f"/{Gemini.models[0]}:" in request.url.path:
+                raise httpx.ReadTimeout("read timed out")
+            return success()
+
+        ai = Gemini(
+            "a,b", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        self.assertEqual(await ai.generate("test"), "hello")
+        # A hanging model must not eat the budget key by key.
+        self.assertEqual(len(calls), 2)
+        self.assertIn(f"/{Gemini.models[1]}:", calls[1])
+        await ai.close()
+
     async def test_exhaustion_and_no_key_leak(self):
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda _: httpx.Response(429))

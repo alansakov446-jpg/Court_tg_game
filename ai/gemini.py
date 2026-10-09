@@ -55,7 +55,9 @@ class Gemini:
         )[:5]
         self.cooldowns = {}
         self.clock = clock
-        self.client = client or httpx.AsyncClient(timeout=25)
+        # Thinking models can answer slowly under load; the read timeout only
+        # bounds one attempt, the case budget bounds the whole generation.
+        self.client = client or httpx.AsyncClient(timeout=30)
 
     async def close(self):
         await self.client.aclose()
@@ -82,6 +84,16 @@ class Gemini:
             label,
             f" {details}" if details else "",
         )
+
+    def cool_model(self, model, seconds=60):
+        """Degraded or hanging model: skip all of its keys until the cooldown ends.
+
+        A 5xx answer, timeout or network error is a property of the model's
+        serving, not of one key — burning the remaining keys (and the case
+        budget) on the same model would never reach the fallback model.
+        """
+        for index in range(len(self.keys)):
+            self.cooldowns[model, index] = self.clock() + seconds
 
     def http_error(self, response):
         """One label: HTTP status, provider code and a redacted, capped message.
@@ -185,6 +197,8 @@ class Gemini:
                         )
                         continue
                     if response.is_error:
+                        if response.status_code >= 500:
+                            self.cool_model(model)
                         self.note(
                             attempts,
                             model,
@@ -218,6 +232,7 @@ class Gemini:
                             answer_chars=len(text),
                         )
                 except httpx.TimeoutException as exc:
+                    self.cool_model(model)
                     self.note(
                         attempts,
                         model,
@@ -227,6 +242,7 @@ class Gemini:
                         limit=self.timeout_setting(),
                     )
                 except httpx.HTTPError as exc:
+                    self.cool_model(model)
                     self.note(
                         attempts,
                         model,

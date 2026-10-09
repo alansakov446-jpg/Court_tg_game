@@ -242,7 +242,7 @@ class Court:
             ).all()
         )
         try:
-            async with asyncio.timeout(45):
+            async with asyncio.timeout(60):
                 case = await create_case(self.ai, [s[0] for s in specs], previous)
             digest = fingerprint(case["crime"])
             if await self.db.scalar(select(Game.id).where(Game.case_hash == digest)):

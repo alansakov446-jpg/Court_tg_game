@@ -22,8 +22,8 @@ from ai.host import create_case
 from game.rules import role_specs
 
 REPORT = os.getenv("PROBE_REPORT", "diagnostics/last-ai-probe.md")
-# Mirrors Court.start: the poller gives the generator 45 seconds.
-CASE_TIMEOUT = 45
+# Mirrors Court.start: the poller gives the generator 60 seconds.
+CASE_TIMEOUT = 60
 
 
 class Capture(logging.Handler):
