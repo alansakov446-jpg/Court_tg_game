@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 # Allow `python scripts/ai_probe.py` from a checkout root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -24,6 +26,24 @@ from game.rules import role_specs
 REPORT = os.getenv("PROBE_REPORT", "diagnostics/last-ai-probe.md")
 # Mirrors Court.start: the poller gives the generator 60 seconds.
 CASE_TIMEOUT = 60
+URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+# One tiny prompt per config: which generationConfig fields each model accepts.
+# Only labels, statuses and redacted provider messages are logged — never bodies.
+SHAPE_CONFIGS = [
+    ("bare_800", {"maxOutputTokens": 800}),
+    ("max6000", {"maxOutputTokens": 6000}),
+    ("mime", {"maxOutputTokens": 800, "responseMimeType": "application/json"}),
+    ("think0", {"maxOutputTokens": 800, "thinkingConfig": {"thinkingBudget": 0}}),
+    ("think1024", {"maxOutputTokens": 800, "thinkingConfig": {"thinkingBudget": 1024}}),
+    (
+        "full_case",
+        {
+            "maxOutputTokens": 6000,
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    ),
+]
 
 
 class Capture(logging.Handler):
@@ -35,6 +55,53 @@ class Capture(logging.Handler):
 
     def emit(self, record):
         self.lines.append(self.format(record))
+
+
+async def shape_probes(ai, keys):
+    """Find which generationConfig fields each model accepts (key #0 only)."""
+    log = logging.getLogger("court.probe")
+    if not keys:
+        log.warning("Shape probes skipped: no keys configured")
+        return
+    log.info(
+        "Shape probe start configs=%d models=%s",
+        len(SHAPE_CONFIGS),
+        ",".join(Gemini.models),
+    )
+    for model in Gemini.models:
+        for label, config in SHAPE_CONFIGS:
+            try:
+                response = await ai.client.post(
+                    URL.format(model=model),
+                    headers={"x-goog-api-key": keys[0]},
+                    json={
+                        "contents": [{"parts": [{"text": "Ответь одним словом: ок"}]}],
+                        "generationConfig": config,
+                    },
+                )
+            except httpx.HTTPError as exc:
+                log.warning(
+                    "Shape probe model=%s config=%s network=%s",
+                    model,
+                    label,
+                    type(exc).__name__,
+                )
+                continue
+            if response.is_error:
+                log.warning(
+                    "Shape probe model=%s config=%s %s",
+                    model,
+                    label,
+                    ai.http_error(response),
+                )
+            else:
+                _, reason = ai.parse(response)
+                log.info(
+                    "Shape probe model=%s config=%s OK%s",
+                    model,
+                    label,
+                    f" {reason}" if reason else "",
+                )
 
 
 async def main():
@@ -64,6 +131,7 @@ async def main():
     try:
         ai = Gemini(os.environ.get("GEMINI_API", ""))
         try:
+            await shape_probes(ai, keys)
             async with asyncio.timeout(CASE_TIMEOUT):
                 case = await create_case(ai, codes, previous)
             # Only structural facts about the answer; never its text or truth.
