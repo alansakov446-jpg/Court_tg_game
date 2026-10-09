@@ -104,18 +104,21 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(p.is_bot)
             self.assertTrue(p.permanent)
 
-    async def test_exact_case_duplicate_never_starts(self):
+    async def test_exact_case_duplicate_never_repeats_the_case(self):
         async with self.sessions() as session, session.begin():
             first = await self.create_game(session)
             court = Court(session, self.bot, self.ai, "test_bot")
             await court.start(first)
+            first_hash = first.case_hash
             first.status = "finished"
             await session.flush()
             second = await self.create_game(session)
             await court.start(second)
-            self.assertEqual(second.status, "lobby")
-            self.assertIsNone(second.case_hash)
-            self.assertGreater(second.deadline, utcnow())
+            # The duplicated AI draft is rejected: the room still starts, on the
+            # unique fallback template, and never replays the same story.
+            self.assertEqual(second.status, "running")
+            self.assertNotEqual(second.case_hash, first_hash)
+            self.assertIn("Дело №", second.state["crime"])
 
     async def test_jury_and_reward_survive_restart(self):
         async with self.sessions() as session, session.begin():

@@ -1,0 +1,92 @@
+name: AI probe
+# Live diagnostics for the case generator: runs create_case against the real
+# GEMINI_API secret on the runner and appends sanitized excerpts from recent
+# Court bot runs. The report is committed to the branch that triggered the run.
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore: [main]
+permissions:
+  contents: write
+  actions: read
+  checks: write
+concurrency:
+  group: ai-probe-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GEMINI_API: ${{ secrets.GEMINI_API }}
+      PROBE_REPORT: diagnostics/last-ai-probe.md
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Probe case generation
+        shell: bash
+        run: python scripts/ai_probe.py
+      - name: Collect recent Court bot log excerpts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "## Recent Court bot runs (sanitized excerpts)"
+            echo ""
+            echo "| run | event | conclusion | created |"
+            echo "|---|---|---|---|"
+            gh run list --workflow=bot.yml --limit 6 --json databaseId,event,conclusion,createdAt \
+              --jq '.[] | "| \(.databaseId) | \(.event) | \(.conclusion) | \(.createdAt) |"'
+            echo ""
+            for id in $(gh run list --workflow=bot.yml --limit 6 --json databaseId --jq '.[].databaseId'); do
+              echo "### run $id"
+              echo '```'
+              gh run view "$id" --log 2>/dev/null \
+                | grep -E 'court\.(ai|game)' \
+                | grep -E ' (WARNING|ERROR) |Lobby opened|Case draft|Case created|Case generation|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram' \
+                | tail -n 30 || echo "(no matching lines)"
+              echo '```'
+              echo ""
+            done
+          } >> "$PROBE_REPORT"
+      - name: Publish report as check run
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - "$PROBE_REPORT" > /tmp/check.json <<'PY'
+          import json, os, sys
+          text = open(sys.argv[1], encoding="utf-8").read()
+          json.dump({
+              "name": "AI probe report",
+              "head_sha": os.environ["GITHUB_SHA"],
+              "status": "completed",
+              "conclusion": "success",
+              "output": {
+                  "title": "AI probe (sanitized)",
+                  "summary": "Diagnostics from scripts/ai_probe.py; no keys, prompts or answers.",
+                  "text": text[:60000],
+              },
+          }, sys.stdout)
+          PY
+          gh api "repos/${GITHUB_REPOSITORY}/check-runs" --input /tmp/check.json > /dev/null
+      - name: Commit sanitized report
+        if: github.ref_name != 'main'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$PROBE_REPORT"
+          if git diff --cached --quiet; then
+            echo "No report changes to commit"
+            exit 0
+          fi
+          git commit -m "diagnostics: AI probe report [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}" \
+            || (git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}")
