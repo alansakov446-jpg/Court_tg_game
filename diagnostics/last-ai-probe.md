@@ -13,10 +13,10 @@ Keys, prompts, answers, case text and truth are never logged or stored.
 ```
 court.probe INFO Probe start keys_configured=5 models=gemini-3.8-flash,gemini-3.5-flash-lite case_timeout=60s
 court.probe INFO Shape probe start configs=6 models=gemini-3.8-flash,gemini-3.5-flash-lite
-court.probe INFO Shape probe model=gemini-3.8-flash config=bare_800 OK
-court.probe INFO Shape probe model=gemini-3.8-flash config=max6000 OK
+court.probe WARNING Shape probe model=gemini-3.8-flash config=bare_800 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
+court.probe WARNING Shape probe model=gemini-3.8-flash config=max6000 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
 court.probe WARNING Shape probe model=gemini-3.8-flash config=mime http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
-court.probe INFO Shape probe model=gemini-3.8-flash config=think0 OK
+court.probe WARNING Shape probe model=gemini-3.8-flash config=think0 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
 court.probe WARNING Shape probe model=gemini-3.8-flash config=think1024 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
 court.probe WARNING Shape probe model=gemini-3.8-flash config=full_case http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa'
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=bare_800 OK
@@ -27,14 +27,14 @@ court.probe INFO Shape probe model=gemini-3.5-flash-lite config=think1024 OK
 court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=full_case http=400 INVALID_ARGUMENT message='Request contains an invalid argument.'
 court.ai INFO Gemini attempt failed model=gemini-3.8-flash key=#0 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa' cooldown=60s prompt_chars=918
 court.ai.host INFO Case draft accepted attempt=1/3 roles=9 evidence=6
-court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=501
-court.probe INFO Probe done result=accepted elapsed=22.9s
+court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=332
+court.probe INFO Probe done result=accepted elapsed=49.9s
 ```
 ## Recent Court bot runs (sanitized excerpts)
 
 | run | event | conclusion | created |
 |---|---|---|---|
-| 37979702724 | push |  | 2026-10-09T19:21:45Z |
+| 37979702724 | push | success | 2026-10-09T19:21:45Z |
 | 37978841310 | push | success | 2026-10-09T19:14:18Z |
 | 37977906750 | push | success | 2026-10-09T19:06:12Z |
 | 37968090703 | workflow_dispatch | success | 2026-10-09T17:41:48Z |
@@ -43,7 +43,8 @@ court.probe INFO Probe done result=accepted elapsed=22.9s
 
 ### run 37979702724
 ```
-(no matching lines)
+bot	Poll Telegram updates	2026-10-09T19:22:08.7111402Z 2026-10-09 19:22:08,710 court INFO Polling started as @VsemVstatSudIdet_bot (260s limit)
+bot	Poll Telegram updates	2026-10-09T19:26:32.7932294Z 2026-10-09 19:26:32,792 court INFO Polling stopped after configured 260-second limit
 ```
 
 ### run 37978841310
