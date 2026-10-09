@@ -47,9 +47,8 @@ jobs:
               echo "### run $id"
               echo '```'
               gh run view "$id" --log 2>/dev/null \
-                | grep -E 'court\.(ai|game)' \
-                | grep -E ' (WARNING|ERROR) |Lobby opened|Case draft|Case created|Case generation|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram' \
-                | tail -n 30 || echo "(no matching lines)"
+                | grep -E 'court\.(ai|game).*( (WARNING|ERROR) )|Lobby opened|Case draft|Case created|Case generation|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram' \
+                | tail -n 40 || echo "(no matching lines)"
               echo '```'
               echo ""
             done
