@@ -53,12 +53,12 @@ jobs:
           [ -f poll.log ] || exit 0
           lines=$(grep -E 'court\.(ai|game)' poll.log | grep -E ' (WARNING|ERROR) ' | tail -n 40 || true)
           total=$(printf '%s' "$lines" | grep -c . || true)
+          life=$(grep -E 'Lobby opened|Case draft accepted|Case created|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram' poll.log || true)
           {
             echo '## AI diagnostics'
             echo ''
             if [ "$total" -eq 0 ]; then
               echo 'No AI warnings or errors in this polling window.'
-              echo 'A case creation, if any, is confirmed by a `Case created game=...` line in the log.'
             else
               echo "Found $total AI warning/error line(s) in this run:"
               echo ''
@@ -67,6 +67,17 @@ jobs:
               echo '```'
             fi
             echo ''
+            echo '### Case lifecycle in this window'
+            echo ''
+            if [ -n "$life" ]; then
+              echo '```'
+              printf '%s\n' "$life"
+              echo '```'
+            else
+              echo 'No game activity in this window.'
+            fi
+            echo ''
+            echo 'A started party is confirmed by a `Case created game=...` line above.'
             echo 'Logged: model, HTTP status, provider error code and message (keys redacted),'
             echo 'timeout class, JSON validation reason. Prompts, answers and player data are never logged.'
           } >> "$GITHUB_STEP_SUMMARY"
