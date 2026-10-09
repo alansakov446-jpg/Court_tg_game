@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import httpx
@@ -80,6 +81,70 @@ class CascadeTests(unittest.IsolatedAsyncioTestCase):
         # A hanging model must not eat the budget key by key.
         self.assertEqual(len(calls), 2)
         self.assertIn(f"/{Gemini.models[1]}:", calls[1])
+        await ai.close()
+
+    async def test_thinking_budget_rejected_model_is_retried_slim(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            config = json.loads(request.content)["generationConfig"]
+            if "thinkingConfig" in config:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "status": "INVALID_ARGUMENT",
+                            "message": "Request contains an invalid argument.",
+                        }
+                    },
+                )
+            return success()
+
+        ai = Gemini(
+            "a", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        self.assertEqual(await ai.generate("test"), "hello")
+        self.assertEqual(len(calls), 2)  # full config 400 -> slim config answers
+        self.assertIn(
+            "thinkingConfig",
+            json.loads(calls[0].content)["generationConfig"],
+        )
+        self.assertNotIn(
+            "thinkingConfig",
+            json.loads(calls[1].content)["generationConfig"],
+        )
+        await ai.close()
+
+    async def test_slim_config_is_remembered_per_model(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            config = json.loads(request.content)["generationConfig"]
+            if "thinkingConfig" in config:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "status": "INVALID_ARGUMENT",
+                            "message": "Request contains an invalid argument.",
+                        }
+                    },
+                )
+            return success()
+
+        ai = Gemini(
+            "a", client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        self.assertEqual(await ai.generate("test"), "hello")
+        self.assertEqual(await ai.generate("test"), "hello")
+        # Second call goes straight to the slim config: 2 requests then 1.
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn(
+            "thinkingConfig",
+            json.loads(calls[2].content)["generationConfig"],
+        )
         await ai.close()
 
     async def test_exhaustion_and_no_key_leak(self):

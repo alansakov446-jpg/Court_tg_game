@@ -54,6 +54,7 @@ class Gemini:
             dict.fromkeys(k.strip() for k in keys.split(",") if k.strip())
         )[:5]
         self.cooldowns = {}
+        self.slim_models = set()
         self.clock = clock
         # Thinking models can answer slowly under load; the read timeout only
         # bounds one attempt, the case budget bounds the whole generation.
@@ -158,13 +159,15 @@ class Gemini:
         value = getattr(getattr(self.client, "timeout", None), "read", None)
         return f"{value:g}s" if isinstance(value, (int, float)) else ""
 
-    async def request(self, model, key, prompt, json_mode):
-        config = {
-            "maxOutputTokens": 6000 if json_mode else 800,
-            "thinkingConfig": {"thinkingBudget": 0},
-        }
+    async def request(self, model, key, prompt, json_mode, slim=False):
+        config = {"maxOutputTokens": 6000 if json_mode else 800}
         if json_mode:
             config["responseMimeType"] = "application/json"
+        # thinkingBudget=0 keeps answers fast, but some models reject it
+        # (gemini-3.5-flash-lite returns 400 INVALID_ARGUMENT). Those models are
+        # remembered in slim_models and get no thinkingConfig at all.
+        if not slim and model not in self.slim_models:
+            config["thinkingConfig"] = {"thinkingBudget": 0}
         return await self.client.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
             headers={"x-goog-api-key": key},
@@ -185,6 +188,20 @@ class Gemini:
                     continue
                 try:
                     response = await self.request(model, key, prompt, json_mode)
+                    if response.status_code == 400 and model not in self.slim_models:
+                        # Probe-proven quirk: gemini-3.5-flash-lite rejects
+                        # thinkingBudget=0 with 400 but accepts the slim config.
+                        slim = await self.request(
+                            model, key, prompt, json_mode, slim=True
+                        )
+                        if slim.status_code != 400:
+                            log.info(
+                                "Gemini slim config accepted model=%s key=#%d",
+                                model,
+                                index,
+                            )
+                            self.slim_models.add(model)
+                            response = slim
                     if response.status_code == 429:
                         self.cooldowns[model, index] = self.clock() + 60
                         self.note(
