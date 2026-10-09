@@ -125,11 +125,12 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.court.verdict(self.game, "innocent")
         self.court.finish.assert_awaited_once_with(self.game, "innocent")
 
-    async def test_case_failure_is_logged_with_its_reason(self):
+    async def test_case_failure_uses_fallback_template_and_starts(self):
         self.game.status = "lobby"
         self.court.players = AsyncMock(return_value=[])
         empty = MagicMock(all=MagicMock(return_value=[]))
         self.db.scalars = AsyncMock(return_value=empty)
+        self.db.flush = AsyncMock()
         failure = AIUnavailable("ИИ временно недоступен", summary="http=429 x10")
         with (
             patch("game.service.create_case", AsyncMock(side_effect=failure)),
@@ -139,8 +140,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(logs.output)
         self.assertIn("New case was not created game=1 players=0", output)
         self.assertIn("AIUnavailable: http=429 x10", output)
-        self.assertIn("retry in 60s", output)
-        self.assertEqual(self.game.status, "lobby")  # the room survives the failure
+        self.assertIn("fallback template used", output)
+        self.assertNotIn("Игрок", output)  # names and chat text stay out of the logs
+        # The room must start even with the AI down: deterministic template case.
+        self.assertEqual(self.game.status, "running")
+        self.assertIn("Дело №1", self.game.state["crime"])
+        self.assertEqual(self.game.state["truth"], "innocent")
+        messages = [str(call.args[1]) for call in self.bot.send_message.await_args_list]
+        chat = "\n".join(messages)
+        self.assertIn("стандартному делу из шаблона", chat)
+        self.assertIn("квоты ИИ исчерпаны", chat)  # the specific reason is told to players
 
     async def test_bot_speech_fallback_is_logged_without_player_data(self):
         self.game.phase = "debate"

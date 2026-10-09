@@ -44,7 +44,10 @@ def summarize(attempts):
 
 
 class Gemini:
-    models = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
+    # gemini-2.5-* was retired by the provider (HTTP 404 NOT_FOUND for every key).
+    # The 404 message names these replacements; the probe in scripts/ai_probe.py
+    # verifies the cascade against the live API.
+    models = ("gemini-3.8-flash", "gemini-3.5-flash-lite")
 
     def __init__(self, keys: str, client=None, clock=time.monotonic):
         self.keys = list(

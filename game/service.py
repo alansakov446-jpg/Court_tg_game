@@ -15,6 +15,8 @@ from game.rules import (
     LABELS,
     PHASES,
     SPEAKERS,
+    explain_failure,
+    fallback_case,
     fingerprint,
     role_specs,
 )
@@ -252,20 +254,22 @@ class Court:
                     "Получилось повторное дело", summary="duplicate_case"
                 )
         except (AIUnavailable, TimeoutError) as exc:
-            # The room survives, so this must not disappear from the logs silently.
+            # The room must always start: fall back to the deterministic template.
+            # The reason is logged in full and told to the players in plain words.
             log.error(
-                "New case was not created game=%s players=%d reason=%s; retry in 60s",
+                "New case was not created game=%s players=%d reason=%s; fallback template used",
                 game.id,
                 len(people),
                 cause(exc),
             )
-            game.deadline = utcnow() + timedelta(seconds=60)
-            game.last_notice = utcnow()
+            case = fallback_case([s[0] for s in specs], game.id)
+            digest = fingerprint(case["crime"])
             await self.send(
                 game.chat_id,
-                "Ведущий не смог подготовить новое дело. Повтор через минуту; /stop закрывает зал.",
+                "⚠️ Ведущий не смог сгенерировать новое дело: "
+                + explain_failure(exc)
+                + ".\nИгра начинается по стандартному делу из шаблона.",
             )
-            return
         for i in range(len(specs) - len(people)):
             p = Player(game_id=game.id, name=f"Бот {i + 1}", is_bot=True, active=True)
             self.db.add(p)

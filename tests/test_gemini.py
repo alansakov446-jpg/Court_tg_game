@@ -19,7 +19,7 @@ class CascadeTests(unittest.IsolatedAsyncioTestCase):
             calls.append((request.url.path, request.headers["x-goog-api-key"]))
             return (
                 httpx.Response(429)
-                if "/gemini-2.5-flash:" in request.url.path
+                if f"/{Gemini.models[0]}:" in request.url.path
                 else success()
             )
 
@@ -97,7 +97,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             await ai.generate("test")
         output = "\n".join(logs.output)
         self.assertIn("http=400 INVALID_ARGUMENT", output)
-        self.assertIn("model=gemini-2.5-flash", output)
+        self.assertIn(f"model={Gemini.models[0]}", output)
         self.assertIn("[redacted]", output)
         self.assertNotIn("secret", output)
         self.assertIn("http=400 INVALID_ARGUMENT", cm.exception.summary)
@@ -117,7 +117,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(logs.output)
         self.assertIn("timeout=ReadTimeout", output)
         self.assertIn("limit=5s", output)
-        self.assertIn("gemini-2.5-flash-lite", output)
+        self.assertIn(Gemini.models[1], output)
         self.assertIn("json_mode=True", output)
         self.assertEqual(cm.exception.summary, "timeout=ReadTimeout x2")
         await ai.close()

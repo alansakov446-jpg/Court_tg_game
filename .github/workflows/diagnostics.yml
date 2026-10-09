@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   actions: read
+  checks: write
 concurrency:
   group: ai-probe-${{ github.ref }}
   cancel-in-progress: false
@@ -53,7 +54,30 @@ jobs:
               echo ""
             done
           } >> "$PROBE_REPORT"
+      - name: Publish report as check run
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - "$PROBE_REPORT" > /tmp/check.json <<'PY'
+          import json, os, sys
+          text = open(sys.argv[1], encoding="utf-8").read()
+          json.dump({
+              "name": "AI probe report",
+              "head_sha": os.environ["GITHUB_SHA"],
+              "status": "completed",
+              "conclusion": "success",
+              "output": {
+                  "title": "AI probe (sanitized)",
+                  "summary": "Diagnostics from scripts/ai_probe.py; no keys, prompts or answers.",
+                  "text": text[:60000],
+              },
+          }, sys.stdout)
+          PY
+          gh api "repos/${GITHUB_REPOSITORY}/check-runs" --input /tmp/check.json > /dev/null
       - name: Commit sanitized report
+        if: github.ref_name != 'main'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
