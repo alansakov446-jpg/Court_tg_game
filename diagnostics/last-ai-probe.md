@@ -26,15 +26,17 @@ court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=think0 http=4
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=think1024 OK
 court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=full_case http=400 INVALID_ARGUMENT message='Request contains an invalid argument.'
 court.ai INFO Gemini attempt failed model=gemini-3.8-flash key=#0 http=429 RESOURCE_EXHAUSTED message='You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usa' cooldown=60s prompt_chars=918
+court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#1 http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' prompt_chars=918
+court.ai INFO Gemini slim config accepted model=gemini-3.5-flash-lite key=#0
 court.ai.host INFO Case draft accepted attempt=1/3 roles=9 evidence=6
-court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=335
-court.probe INFO Probe done result=accepted elapsed=15.6s
+court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=493
+court.probe INFO Probe done result=accepted elapsed=12.8s
 ```
 ## Recent Court bot runs (sanitized excerpts)
 
 | run | event | conclusion | created |
 |---|---|---|---|
-| 37978841310 | push |  | 2026-10-09T19:14:18Z |
+| 37978841310 | push | success | 2026-10-09T19:14:18Z |
 | 37977906750 | push | success | 2026-10-09T19:06:12Z |
 | 37968090703 | workflow_dispatch | success | 2026-10-09T17:41:48Z |
 | 37967978905 | push | success | 2026-10-09T17:40:50Z |
@@ -43,7 +45,10 @@ court.probe INFO Probe done result=accepted elapsed=15.6s
 
 ### run 37978841310
 ```
-(no matching lines)
+bot	Poll Telegram updates	2026-10-09T19:14:43.3725953Z 2026-10-09 19:14:43,372 court INFO Polling started as @VsemVstatSudIdet_bot (260s limit)
+bot	Poll Telegram updates	2026-10-09T19:19:05.2321995Z 2026-10-09 19:19:05,231 court INFO Polling stopped after configured 260-second limit
+bot	Report AI diagnostics	2026-10-09T19:19:06.4244444Z ^[[36;1mlife=$(grep -E 'Lobby opened|Case draft accepted|Case created|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram' poll.log || true)^[[0m
+bot	Report AI diagnostics	2026-10-09T19:19:06.4252739Z ^[[36;1m  echo 'A started party is confirmed by a `Case created game=...` line above.'^[[0m
 ```
 
 ### run 37977906750
