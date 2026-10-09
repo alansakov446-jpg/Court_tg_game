@@ -5,17 +5,22 @@ Keys, prompts, answers, case text and truth are never logged or stored.
 
 - keys configured: 5
 - models: gemini-3.8-flash, gemini-3.5-flash-lite
-- create_case timeout: 45s (same as the poller)
+- create_case timeout: 60s (same as the poller)
 - result: failed
 
 ## Probe log lines
 
 ```
-court.probe INFO Probe start keys_configured=5 models=gemini-3.8-flash,gemini-3.5-flash-lite case_timeout=45s
+court.probe INFO Probe start keys_configured=5 models=gemini-3.8-flash,gemini-3.5-flash-lite case_timeout=60s
 court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#0 http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' prompt_chars=918
-court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#1 timeout=ReadTimeout prompt_chars=918 limit=25s
-court.probe ERROR Probe case failed reason=TimeoutError after 45s
-court.probe INFO Probe done result=failed elapsed=45.0s
+court.ai WARNING Gemini attempt failed model=gemini-3.5-flash-lite key=#0 http=400 INVALID_ARGUMENT message='Request contains an invalid argument.' prompt_chars=918
+court.ai WARNING Gemini attempt failed model=gemini-3.5-flash-lite key=#1 http=400 INVALID_ARGUMENT message='Request contains an invalid argument.' prompt_chars=918
+court.ai WARNING Gemini attempt failed model=gemini-3.5-flash-lite key=#2 http=400 INVALID_ARGUMENT message='Request contains an invalid argument.' prompt_chars=918
+court.ai WARNING Gemini attempt failed model=gemini-3.5-flash-lite key=#3 http=400 INVALID_ARGUMENT message='Request contains an invalid argument.' prompt_chars=918
+court.ai WARNING Gemini attempt failed model=gemini-3.5-flash-lite key=#4 http=400 INVALID_ARGUMENT message='Request contains an invalid argument.' prompt_chars=918
+court.ai ERROR Gemini exhausted models=gemini-3.8-flash,gemini-3.5-flash-lite attempts=6 json_mode=True prompt_chars=918 elapsed=5.9s cause=http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.'; http=400 INVALID_ARGUMENT message='Request contains an invalid argument.' x5
+court.probe ERROR Probe case failed reason=AIUnavailable: http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.'; http=400 INVALID_ARGUMENT message='Request contains an invalid argument.' x5
+court.probe INFO Probe done result=failed elapsed=5.9s
 ```
 ## Recent Court bot runs (sanitized excerpts)
 
