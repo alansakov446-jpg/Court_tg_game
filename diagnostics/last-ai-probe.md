@@ -15,10 +15,10 @@ court.probe INFO Probe start keys_configured=5 models=gemini-3.8-flash,gemini-3.
 court.probe INFO Shape probe start configs=6 models=gemini-3.8-flash,gemini-3.5-flash-lite
 court.probe INFO Shape probe model=gemini-3.8-flash config=bare_800 OK
 court.probe INFO Shape probe model=gemini-3.8-flash config=max6000 OK
-court.probe WARNING Shape probe model=gemini-3.8-flash config=mime http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.'
+court.probe INFO Shape probe model=gemini-3.8-flash config=mime OK
 court.probe INFO Shape probe model=gemini-3.8-flash config=think0 OK
 court.probe INFO Shape probe model=gemini-3.8-flash config=think1024 OK
-court.probe WARNING Shape probe model=gemini-3.8-flash config=full_case http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.'
+court.probe INFO Shape probe model=gemini-3.8-flash config=full_case OK
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=bare_800 OK
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=max6000 OK
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=mime OK
@@ -26,8 +26,8 @@ court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=think0 http=4
 court.probe INFO Shape probe model=gemini-3.5-flash-lite config=think1024 OK
 court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=full_case http=400 INVALID_ARGUMENT message='Request contains an invalid argument.'
 court.ai.host INFO Case draft accepted attempt=1/3 roles=9 evidence=6
-court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=453
-court.probe INFO Probe done result=accepted elapsed=37.9s
+court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=442
+court.probe INFO Probe done result=accepted elapsed=40.3s
 ```
 ## Recent Court bot runs (sanitized excerpts)
 
