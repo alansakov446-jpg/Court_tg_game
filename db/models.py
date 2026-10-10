@@ -99,6 +99,17 @@ class Statement(Base):
     )
 
 
+class BotState(Base):
+    """Durable worker state that must survive cache eviction (Telegram offset)."""
+
+    __tablename__ = "bot_state"
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 class Economy(Base):
     __tablename__ = "economy"
     id: Mapped[int] = mapped_column(primary_key=True)

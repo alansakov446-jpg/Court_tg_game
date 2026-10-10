@@ -3,7 +3,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -21,7 +21,7 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.begin() as connection:
             await connection.execute(
                 text(
-                    "TRUNCATE economy, statements, evidence, players, roles, games RESTART IDENTITY CASCADE"
+                    "TRUNCATE economy, statements, evidence, players, roles, games, bot_state RESTART IDENTITY CASCADE"
                 )
             )
         self.bot = SimpleNamespace(send_message=AsyncMock())
@@ -209,3 +209,40 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
                 await c.tick(game)
             self.assertEqual(game.status, "finished")
             self.assertEqual(game.state["result"], "innocent")
+
+    async def test_bot_state_offset_roundtrip_survives_reconnect(self):
+        """The Telegram offset lives in bot_state, not in an evictable cache file."""
+        import tempfile
+
+        from main import OFFSET_KEY, load_offset, save_offset, state_get
+
+        self.assertIsNone(await state_get(self.sessions, OFFSET_KEY))
+        offset, source = await load_offset(self.sessions)
+        self.assertEqual((offset, source), (0, "fresh"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ, {"OFFSET_FILE": os.path.join(tmp, ".offset")}
+            ):
+                await save_offset(424242, self.sessions)
+                offset, source = await load_offset(self.sessions)
+                self.assertEqual((offset, source), (424242, "database"))
+
+                # A brand-new connection pool must see the same committed value.
+                engine2 = create_async_engine(os.environ["TEST_DATABASE_URL"])
+                sessions2 = async_sessionmaker(engine2, expire_on_commit=False)
+                try:
+                    self.assertEqual(
+                        await state_get(sessions2, OFFSET_KEY), "424242"
+                    )
+                finally:
+                    await engine2.dispose()
+
+                await save_offset(424243, self.sessions)  # upsert overwrites
+                self.assertEqual(
+                    await state_get(self.sessions, OFFSET_KEY), "424243"
+                )
+
+        # Leave the poller's operational keys out of the shared test database.
+        async with self.engine.begin() as connection:
+            await connection.execute(text("DELETE FROM bot_state"))
