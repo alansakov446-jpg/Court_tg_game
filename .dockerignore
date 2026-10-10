@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+.env
+__pycache__/
+*.py[cod]
+*.log
+.offset*
+health.json*
+poll.log
+diagnostics/
+tests/
+TZ-alive-bot.md

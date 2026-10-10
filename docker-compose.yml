@@ -1,0 +1,16 @@
+# Long-running transport for the court bot (variant A).
+# One poller per BOT_TOKEN: the advisory lock in main.py prevents duplicates,
+# so keep this service OR the GitHub Actions poller active, not both.
+services:
+  court-bot:
+    build: .
+    restart: always
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN (from @BotFather)}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL (direct Neon URL, not -pooler)}
+      GEMINI_API: ${GEMINI_API:?set GEMINI_API (up to 5 keys, comma separated)}
+      RUN_SECONDS: "0"
+      HEALTHZ_PORT: "8080"
+    ports:
+      # Localhost only: /healthz is an operational probe, not a public API.
+      - "127.0.0.1:8080:8080"

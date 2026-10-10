@@ -1,0 +1,25 @@
+# Fly.io deployment (variant A). Rename `app` to your own unique app name,
+# then: fly launch --copy-config / fly deploy
+# Secrets: fly secrets set BOT_TOKEN=... DATABASE_URL=... GEMINI_API=...
+# DATABASE_URL must be the DIRECT Neon URL, not the -pooler address.
+
+app = "court-tg-game"
+primary_region = "fra"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  # The bot must never be suspended: games run on second-scale deadlines.
+  auto_stop_machines = false
+
+[[http_service.checks]]
+  grace_period = "90s"
+  interval = "30s"
+  timeout = "10s"
+  method = "GET"
+  path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

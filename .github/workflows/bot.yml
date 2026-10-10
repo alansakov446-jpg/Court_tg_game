@@ -19,7 +19,7 @@ jobs:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       GEMINI_API: ${{ secrets.GEMINI_API }}
-      RUN_SECONDS: '260'
+      RUN_SECONDS: '600'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,13 +27,16 @@ jobs:
           python-version: '3.12'
           cache: pip
       - name: Restore Telegram offset
+        # Fallback only: since alembic revision 0002 the database copy in
+        # bot_state is the source of truth; the cache file only seeds it.
         uses: actions/cache/restore@v4
         with:
           path: .offset
           key: court-offset-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: court-offset-
       - run: pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
+      # Unit tests no longer run inside the polling window: they live in tests.yml,
+      # so the scheduled run spends its minutes on polling instead.
       - run: alembic upgrade head
       - name: Poll Telegram updates
         # shell: bash enables pipefail, so a crashed poller still fails this step.
@@ -45,6 +48,44 @@ jobs:
         with:
           path: .offset
           key: court-offset-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Validate polling health
+        # A green run must mean the bot really polled: fail the run when the
+        # window produced zero completed get_updates cycles (busy lock included).
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -s poll.log ]; then
+            echo 'FAIL: poll.log is empty — the poller produced no output at all.'
+            exit 1
+          fi
+          if [ ! -f health.json ]; then
+            echo 'FAIL: health.json was never written — the poller did not reach its health bookkeeping.'
+            exit 1
+          fi
+          if ! jq -e '.poll_cycles >= 1' health.json > /dev/null; then
+            echo 'FAIL: zero completed get_updates cycles in this window.'
+            jq -r '"lock=\(.lock) status=\(.status) start_lag=\(.start_lag)"' health.json
+            exit 1
+          fi
+          echo "OK: $(jq -r '.poll_cycles' health.json) poll cycles, $(jq -r '.updates_handled' health.json) updates handled."
+      - name: Report poller health
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Poller health'
+            echo ''
+            if [ -f health.json ]; then
+              echo '```'
+              jq -r '"bot: \(.bot // "unknown")\npoll cycles: \(.poll_cycles)\nupdates seen/handled: \(.updates_seen)/\(.updates_handled)\nwindow (UTC): \(.started_at) .. \(.stopped_at // "running")\nlock=\(.lock) offset=\(.offset // "n/a") (source: \(.offset_source // "unknown")) pending_lag=\(.pending_lag) start_lag=\(.start_lag) status=\(.status)"' health.json
+              echo '```'
+              echo ''
+              echo '`pending_lag` is the largest distance between the newest pending update and the offset seen during the window.'
+              echo '`start_lag` is the backlog already queued in Telegram when the window opened (the gap between windows).'
+            else
+              echo 'health.json is missing — the poller never reached its polling loop.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Report AI diagnostics
         # A green run does not mean the AI worked: failures are logged, not raised.
         if: always()
@@ -53,7 +94,7 @@ jobs:
           [ -f poll.log ] || exit 0
           lines=$(grep -E 'court\.(ai|game)' poll.log | grep -E ' (WARNING|ERROR) ' | tail -n 40 || true)
           total=$(printf '%s' "$lines" | grep -c . || true)
-          life=$(grep -E 'Lobby opened|Case draft accepted|Case created|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram' poll.log || true)
+          life=$(grep -E 'Lobby opened|Case draft accepted|Case created|New case was not created|Polling started|Polling stopped|Another worker|Another Telegram|Health polls=|Bot looks dead' poll.log || true)
           {
             echo '## AI diagnostics'
             echo ''
@@ -86,15 +127,21 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: poller-log-${{ github.run_id }}-${{ github.run_attempt }}
-          path: poll.log
+          path: |
+            poll.log
+            health.json
           retention-days: 7
           if-no-files-found: ignore
       - name: Explain normal poller exit
+        # Printed only when the health validator above confirmed real polling.
         if: success()
+        shell: bash
         run: |
+          jq -e '.poll_cycles >= 1' health.json > /dev/null || exit 1
           {
             echo '## Telegram polling window completed'
             echo ''
-            echo 'This run polls Telegram for up to 260 seconds and then exits successfully.'
+            echo 'This run polls Telegram for up to 600 seconds and then exits successfully;'
+            echo 'the health validator has confirmed at least one completed get_updates cycle.'
             echo 'The next run is started by the 5-minute schedule, a push to main, or manual dispatch.'
           } >> "$GITHUB_STEP_SUMMARY"

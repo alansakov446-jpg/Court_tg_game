@@ -1,0 +1,17 @@
+# Render deployment (variant A): a Docker worker that never stops.
+# Set BOT_TOKEN, DATABASE_URL (direct Neon URL, not -pooler) and GEMINI_API
+# as environment variables in the Render dashboard.
+services:
+  - type: worker
+    name: court-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API
+        sync: false
