@@ -246,3 +246,43 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
         # Leave the poller's operational keys out of the shared test database.
         async with self.engine.begin() as connection:
             await connection.execute(text("DELETE FROM bot_state"))
+
+    async def test_ask_host_persists_in_role_memory_for_replacement_bot(self):
+        from game.handlers import handle
+
+        def msg(content, *, private=False):
+            return SimpleNamespace(
+                text=content,
+                chat=SimpleNamespace(
+                    id=123 if private else -100001,
+                    title="Тестовый чат",
+                    type="private" if private else "supergroup",
+                ),
+                from_user=SimpleNamespace(id=123, full_name="Игрок", is_bot=False),
+            )
+
+        async with self.sessions() as session, session.begin():
+            c = Court(session, self.bot, self.ai, "test_bot")
+            await handle(msg("/game"), c)
+            game = await c.active_game(-100001)
+            await handle(msg(f"/start join_{game.chat_id}_{game.id}", private=True), c)
+            await session.flush()
+            await handle(msg("/startnow"), c)
+            self.ai.generate.return_value = (
+                "Преступление произошло в аукционном зале в 21:15."
+            )
+            await handle(msg("/ask где и когда было совершено преступление?"), c)
+            p = await c.player(game, 123)
+            r = await c.role(p)
+            await handle(msg("/leave"), c)
+            self.assertTrue(p.is_bot)
+            gid, r_id = game.id, r.id
+
+        async with self.sessions() as session:
+            game = await session.get(Game, gid)
+            r = await session.get(Role, r_id)
+            c = Court(session, self.bot, self.ai, "test_bot")
+            ctx = await c.context(game, r)
+            memory = "\n".join(ctx["memory"])
+            self.assertIn("где и когда было совершено преступление?", memory)
+            self.assertIn("Преступление произошло в аукционном зале в 21:15.", memory)

@@ -4,22 +4,26 @@ on:
   push:
     branches: [main]
   schedule:
-    # GitHub Actions supports a minimum interval of 5 minutes, not */1.
+    # GitHub Actions supports a minimum interval of 5 minutes, not */1, and
+    # frequently delays scheduled runs by hours. Each shift therefore runs for
+    # 5.5 hours (19800s) and dispatches the next shift on exit; schedule remains
+    # as a root heartbeat and recovery trigger.
     - cron: '*/5 * * * *'
 permissions:
   contents: read
+  actions: write
 concurrency:
   group: court-telegram-poller
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 jobs:
   bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 350
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       GEMINI_API: ${{ secrets.GEMINI_API }}
-      RUN_SECONDS: '600'
+      RUN_SECONDS: '19800'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,9 +43,41 @@ jobs:
       # so the scheduled run spends its minutes on polling instead.
       - run: alembic upgrade head
       - name: Poll Telegram updates
-        # shell: bash enables pipefail, so a crashed poller still fails this step.
+        # shell: bash enables pipefail; if a mid-shift DB/network blip drops
+        # main.py after it has already been polling, reconnect for the remaining
+        # window instead of sleeping until the next cron run.
         shell: bash
-        run: python main.py 2>&1 | tee poll.log
+        run: |
+          set -o pipefail
+          deadline=$(( $(date +%s) + RUN_SECONDS ))
+          attempt=0
+          : > poll.log
+          while :; do
+            now=$(date +%s)
+            remaining=$(( deadline - now ))
+            if [ "$remaining" -le 15 ] && [ "$attempt" -gt 0 ]; then
+              break
+            fi
+            [ "$remaining" -gt 15 ] || remaining=15
+            attempt=$(( attempt + 1 ))
+            rc=0
+            RUN_SECONDS="$remaining" python main.py 2>&1 | tee -a poll.log || rc=$?
+            if [ -f health.json ] && jq -e '.poll_cycles >= 1' health.json > /dev/null 2>&1; then
+              cp health.json health.last_ok.json
+            fi
+            if [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || [ ! -f health.last_ok.json ]; then
+              [ -f health.last_ok.json ] && cp health.last_ok.json health.json || true
+              exit "$rc"
+            fi
+            now=$(date +%s)
+            if [ $(( deadline - now )) -le 30 ]; then
+              cp health.last_ok.json health.json
+              exit 0
+            fi
+            echo "Poller exited with code $rc on attempt $attempt; reconnecting in 5s..." | tee -a poll.log
+            sleep 5
+          done
+          [ -f health.last_ok.json ] && cp health.last_ok.json health.json || true
       - name: Save Telegram offset
         if: always()
         uses: actions/cache/save@v4
@@ -141,7 +177,31 @@ jobs:
           {
             echo '## Telegram polling window completed'
             echo ''
-            echo 'This run polls Telegram for up to 600 seconds and then exits successfully;'
+            echo 'This run polled Telegram for up to 19800 seconds (5.5 hours) and exited cleanly;'
             echo 'the health validator has confirmed at least one completed get_updates cycle.'
-            echo 'The next run is started by the 5-minute schedule, a push to main, or manual dispatch.'
+            echo 'The next shift is chained immediately via workflow_dispatch (or the 5-minute schedule).'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Start the next shift
+        # Avoid the multi-hour GitHub schedule gap: when an active polling shift
+        # ends and no next run is queued yet, immediately dispatch the next shift.
+        if: always() && !cancelled() && github.ref_name == 'main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [ ! -f health.json ] || ! jq -e '.poll_cycles >= 1' health.json > /dev/null 2>&1; then
+            echo 'Skipping self-dispatch: this window did not complete a polling cycle.'
+            exit 0
+          fi
+          active=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/bot.yml/runs?per_page=10" \
+            --jq "[.workflow_runs[] | select(.id != ${GITHUB_RUN_ID} and .head_branch == \"main\" and (.status == \"queued\" or .status == \"waiting\" or .status == \"pending\" or .status == \"requested\" or .status == \"in_progress\"))] | length" 2>/dev/null || echo 0)
+          if [ "${active:-0}" -gt 0 ]; then
+            echo "Next shift is already queued ($active active/pending run(s))."
+            exit 0
+          fi
+          curl -sfL --retry 3 --retry-delay 5 --retry-all-errors -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/bot.yml/dispatches" \
+            -d '{"ref":"main"}'
+          echo 'Next shift dispatched.'
