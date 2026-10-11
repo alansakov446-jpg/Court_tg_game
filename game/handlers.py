@@ -13,11 +13,11 @@ HELP = """🏛 Суд — вымышленная судебная игра
 /extend 30 — продлить (предел 5 минут от создания)
 /startnow, /stop — создатель зала или администратор
 /players, /evidence, /balance — участники и материалы
-/ask вопрос — спросить ИИ-ведущего об обстоятельствах дела
 /expert ID — экспертиза за деньги стороны
 /publish ID — опубликовать свою скрытую улику
+/ask вопрос — спросить ИИ-ведущего; ответ сохранится в памяти
 /call ID — вызвать свидетеля (адвокат/прокурор/судья)
-/ask ID вопрос — допросить вызванного свидетеля
+/question ID вопрос — допросить свидетеля (старый /ask ID вопрос тоже работает)
 /object — протест; /objection accept|reject — решение судьи
 /word ID — дать слово; /next — следующая фаза (судья)
 /recuse ID — отвод; повтор команды другими игроками — поддержка
@@ -29,7 +29,6 @@ HELP = """🏛 Суд — вымышленная судебная игра
 В ЛС:
 /games, /use ID — выбрать игру при участии в нескольких
 /role — своя роль и доступные знания
-/ask вопрос — спросить ИИ-ведущего лично (сохраняется в память роли)
 /say anon|public текст — присяжный пишет судье в ЛС
 /sayto ID текст — личное сообщение другому присяжному
 """
@@ -217,6 +216,32 @@ async def handle(m, c):
         if cmd.startswith("/"):
             raise ValueError("Вашей ролью управляет бот")
         return
+    if cmd == "/ask":
+        # Backward compatibility: /ask ID вопрос still interrogates a real
+        # witness in the group. Every other /ask is a question to the AI host.
+        args = arg.split(maxsplit=1)
+        target = (
+            await c.db.get(Player, int(args[0]))
+            if m.chat.type != "private" and args and args[0].isdigit()
+            else None
+        )
+        target_role = await c.role(target) if target else None
+        if (
+            target
+            and target.game_id == game.id
+            and target.active
+            and target_role
+            and target_role.code.startswith("witness_")
+        ):
+            cmd = "/question"
+        else:
+            return await c.ask_host(
+                game,
+                p,
+                arg,
+                m.chat.id,
+                public=m.chat.type != "private",
+            )
     if cmd == "/role":
         context = await c.context(game, r)
         await c.send(
@@ -227,24 +252,6 @@ async def handle(m, c):
         return await c.show_evidence(game, p.user_id, r)
     if cmd == "/evidence":
         return await c.show_evidence(game, m.chat.id, r)
-    if cmd == "/ask":
-        args = arg.split(maxsplit=1)
-        target = (
-            await c.db.get(Player, int(args[0]))
-            if m.chat.type != "private" and args and args[0].isdigit()
-            else None
-        )
-        tr = await c.role(target) if target else None
-        if (
-            not target
-            or target.game_id != game.id
-            or not target.active
-            or not tr
-            or not tr.code.startswith("witness_")
-        ):
-            return await c.ask_host(
-                game, p, r, arg, private=(m.chat.type == "private")
-            )
     if cmd in ("/say", "/sayto"):
         if m.chat.type != "private" or not r.code.startswith("juror_"):
             raise ValueError("Переписка присяжных работает в ЛС бота")
@@ -312,7 +319,7 @@ async def handle(m, c):
             )
         e.visible_to_roles = list(set(e.visible_to_roles + ["public"]))
         return await c.public(game, f"Приобщено: #{e.id} {e.title}: {e.content}")
-    if cmd in ("/call", "/word", "/ask"):
+    if cmd in ("/call", "/word", "/question"):
         from datetime import timedelta
 
         args = arg.split(maxsplit=1)
@@ -326,15 +333,15 @@ async def handle(m, c):
             )
         if cmd == "/word" and r.code != "judge":
             raise ValueError("Слово предоставляет судья")
-        if cmd in ("/call", "/ask") and (
+        if cmd in ("/call", "/question") and (
             r.code not in ("judge", "prosecutor", "defense")
             or not tr.code.startswith("witness_")
         ):
             raise ValueError("Свидетеля вызывают судья, прокурор или адвокат")
-        if cmd == "/ask":
+        if cmd == "/question":
             if game.state["speaker"] != tr.code or len(args) < 2:
                 raise ValueError(
-                    "Сначала вызовите свидетеля: /call ID, затем /ask ID вопрос"
+                    "Сначала вызовите свидетеля: /call ID, затем /question ID вопрос"
                 )
             await c.record(
                 game, f"{r.title} спрашивает свидетеля: {args[1][:1500]}", ["public"], p

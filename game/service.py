@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 
 from ai.gemini import AIUnavailable, cause
-from ai.host import ask_host, create_case, plan_action, speak
+from ai.host import answer_question, create_case, plan_action, speak
 from db.models import Economy, Evidence, Game, Player, Role, Statement, utcnow
 from game.rules import (
     DURATIONS,
@@ -105,13 +105,16 @@ class Court:
             )
         )
 
-    async def context(self, game, role):
-        # Fetch only authorized rows. Never pass game.state (contains truth) to a bot.
+    async def context(self, game, role=None):
+        # Fetch only authorized rows. Never pass game.state (contains truth) to AI.
+        # A public /ask passes role=None; a private /ask and a replacement bot get
+        # exactly the public facts plus the durable memory of their role.
+        visible = ["public"] + ([role.code] if role else [])
         evidence = (
             await self.db.scalars(
                 select(Evidence).where(
                     Evidence.game_id == game.id,
-                    Evidence.visible_to_roles.overlap(["public", role.code]),
+                    Evidence.visible_to_roles.overlap(visible),
                 )
             )
         ).all()
@@ -120,7 +123,7 @@ class Court:
                 select(Statement)
                 .where(
                     Statement.game_id == game.id,
-                    Statement.visible_to_roles.overlap(["public", role.code]),
+                    Statement.visible_to_roles.overlap(visible),
                 )
                 .order_by(Statement.id.desc())
             )
@@ -133,37 +136,48 @@ class Court:
             "memory": [s.content for s in reversed(statements)],
         }
 
-    async def ask_host(self, game, p, role, question, *, private=False):
-        question = (question or "").strip()
-        if not question:
-            raise ValueError("Укажите вопрос ведущему: /ask вопрос")
-        if len(question) > 1500:
-            raise ValueError("Вопрос до 1500 символов")
-        ctx = await self.context(game, role)
-        if game.state.get("crime") and not any(
-            game.state["crime"] in m for m in ctx.get("memory", [])
-        ):
-            ctx = {**ctx, "crime": game.state["crime"]}
+    async def ask_host(self, game, player, question, chat_id, *, public=False):
+        """Ask the AI host and persist the Q&A as role/public memory.
+
+        Private questions may use and update the player's role memory. Questions
+        asked in the group use public materials only, so an answer cannot expose
+        the asker's secret role knowledge to everyone. A later replacement bot
+        reads the same Statement rows through context().
+        """
+        question = question.strip()
+        if not 2 <= len(question) <= 1000:
+            raise ValueError("Вопрос ведущему должен быть от 2 до 1000 символов")
+        role = await self.role(player)
+        if not role:
+            raise ValueError("Сначала получите роль в начавшейся игре")
         try:
-            async with asyncio.timeout(15):
-                answer = await ask_host(self.ai, role.title, question, ctx)
+            async with asyncio.timeout(20):
+                answer = await answer_question(
+                    self.ai,
+                    role.title,
+                    question,
+                    await self.context(game, None if public else role),
+                )
         except (AIUnavailable, TimeoutError) as exc:
             log.warning(
-                "Host answer fallback game=%s phase=%s role=%s reason=%s",
+                "Host answer unavailable game=%s role=%s reason=%s",
                 game.id,
-                game.phase,
-                getattr(role, "code", None),
+                role.code,
                 cause(exc),
             )
-            crime = game.state.get("crime") or "Описание дела в материалах суда."
-            answer = f"Ведущий временно недоступен. Известные материалы дела: {crime}"
-        entry = f"Вопрос ведущему ({role.title}): {question}\nОтвет ведущего: {answer}"
-        visible = [role.code] if private else ["public", role.code]
-        await self.record(game, entry, visible, p)
-        await self.send(
-            p.user_id if private else game.chat_id,
-            f"🎙 Ведущий ({role.title}): {answer}",
+            raise ValueError(
+                "ИИ-ведущий временно не ответил. Попробуйте /ask ещё раз."
+            ) from None
+        visible = ["public"] if public else [role.code]
+        await self.record(
+            game,
+            f"Вопрос ведущему от роли «{role.title}»: {question}\n"
+            f"Ответ ведущего: {answer}",
+            visible,
+            player,
         )
+        scope = "общей памяти" if public else "памяти роли"
+        await self.send(chat_id, f"🧠 Ведущий: {answer}\n\nОтвет сохранён в {scope}.")
         return answer
 
     async def new_game(self, message, bots):
@@ -252,13 +266,6 @@ class Court:
             p.active = False
         elif game.status == "running":
             p.is_bot, p.permanent = True, True
-            r = await self.role(p)
-            if r and game.state.get("speaker") == r.code:
-                change(
-                    game,
-                    bot_spoken=False,
-                    bot_due=(utcnow() + timedelta(seconds=5)).isoformat(),
-                )
             await self.public(
                 game,
                 f"{p.name}: я не вывожу, заменяй меня ботом. Роль закреплена за ботом.",
@@ -473,12 +480,6 @@ class Court:
                 "justified": target.violations > 0,
             }
         change(game, removals=removals)
-        if game.state.get("speaker") == r.code:
-            change(
-                game,
-                bot_spoken=False,
-                bot_due=(utcnow() + timedelta(seconds=5)).isoformat(),
-            )
         await self.public(
             game,
             f"{r.title} заменён ботом с теми же знаниями. "

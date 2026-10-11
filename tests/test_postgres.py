@@ -104,6 +104,42 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(p.is_bot)
             self.assertTrue(p.permanent)
 
+    async def test_private_ask_memory_survives_bot_replacement_and_reconnect(self):
+        async with self.sessions() as session, session.begin():
+            game = await self.create_game(session)
+            player = Player(game_id=game.id, user_id=123, name="Игрок")
+            session.add(player)
+            await session.flush()
+            court = Court(session, self.bot, self.ai, "test_bot")
+            await court.start(game)
+            with patch(
+                "game.service.answer_question",
+                AsyncMock(return_value="Событие произошло в галерее."),
+            ):
+                await court.ask_host(
+                    game,
+                    player,
+                    "Где произошло событие?",
+                    player.user_id,
+                    public=False,
+                )
+            player.is_bot = True
+            gid, pid = game.id, player.id
+
+        # A fresh worker/session sees the persisted role-scoped Q&A. The bot
+        # replacing the human receives this exact context on its next turn.
+        async with self.sessions() as session:
+            game = await session.get(Game, gid)
+            player = await session.get(Player, pid)
+            role = await session.get(Role, player.role_id)
+            context = await Court(session, self.bot, self.ai, "test_bot").context(
+                game, role
+            )
+            self.assertTrue(player.is_bot)
+            memory = "\n".join(context["memory"])
+            self.assertIn("Где произошло событие?", memory)
+            self.assertIn("Событие произошло в галерее.", memory)
+
     async def test_exact_case_duplicate_never_repeats_the_case(self):
         async with self.sessions() as session, session.begin():
             first = await self.create_game(session)
@@ -246,43 +282,3 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
         # Leave the poller's operational keys out of the shared test database.
         async with self.engine.begin() as connection:
             await connection.execute(text("DELETE FROM bot_state"))
-
-    async def test_ask_host_persists_in_role_memory_for_replacement_bot(self):
-        from game.handlers import handle
-
-        def msg(content, *, private=False):
-            return SimpleNamespace(
-                text=content,
-                chat=SimpleNamespace(
-                    id=123 if private else -100001,
-                    title="Тестовый чат",
-                    type="private" if private else "supergroup",
-                ),
-                from_user=SimpleNamespace(id=123, full_name="Игрок", is_bot=False),
-            )
-
-        async with self.sessions() as session, session.begin():
-            c = Court(session, self.bot, self.ai, "test_bot")
-            await handle(msg("/game"), c)
-            game = await c.active_game(-100001)
-            await handle(msg(f"/start join_{game.chat_id}_{game.id}", private=True), c)
-            await session.flush()
-            await handle(msg("/startnow"), c)
-            self.ai.generate.return_value = (
-                "Преступление произошло в аукционном зале в 21:15."
-            )
-            await handle(msg("/ask где и когда было совершено преступление?"), c)
-            p = await c.player(game, 123)
-            r = await c.role(p)
-            await handle(msg("/leave"), c)
-            self.assertTrue(p.is_bot)
-            gid, r_id = game.id, r.id
-
-        async with self.sessions() as session:
-            game = await session.get(Game, gid)
-            r = await session.get(Role, r_id)
-            c = Court(session, self.bot, self.ai, "test_bot")
-            ctx = await c.context(game, r)
-            memory = "\n".join(ctx["memory"])
-            self.assertIn("где и когда было совершено преступление?", memory)
-            self.assertIn("Преступление произошло в аукционном зале в 21:15.", memory)

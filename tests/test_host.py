@@ -1,7 +1,7 @@
 import unittest
 
 from ai.gemini import AIUnavailable
-from ai.host import ask_host, create_case, plan_action
+from ai.host import answer_question, create_case, plan_action
 from game.rules import role_specs
 
 CODES = [spec[0] for spec in role_specs(9)]
@@ -30,8 +30,10 @@ class FakeAI:
     def __init__(self, answers):
         self.answers = list(answers)
         self.calls = 0
+        self.prompts = []
 
     async def generate(self, prompt, *, json_mode=False):
+        self.prompts.append(prompt)
         answer = self.answers[min(self.calls, len(self.answers) - 1)]
         self.calls += 1
         if isinstance(answer, BaseException):
@@ -71,6 +73,29 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ai.calls, 1)  # the cascade is already exhausted
         self.assertEqual(cm.exception.summary, "http=429 x10")
 
+    async def test_host_answers_only_from_supplied_materials(self):
+        ai = FakeAI(["В материалах указано: событие произошло на складе."])
+        context = {
+            "phase": "Обвинение",
+            "evidence": [{"id": 1, "title": "Схема", "fact": "Осмотрен склад"}],
+            "memory": [],
+        }
+        answer = await answer_question(
+            ai, "Адвокат", "Где это произошло?", context
+        )
+        self.assertEqual(answer, "В материалах указано: событие произошло на складе.")
+        prompt = ai.prompts[0]
+        self.assertIn("Где это произошло?", prompt)
+        self.assertIn("Осмотрен склад", prompt)
+        self.assertIn("только факты", prompt)
+        self.assertIn("Не раскрывай скрытую виновность", prompt)
+
+    async def test_empty_host_answer_is_unavailable(self):
+        ai = FakeAI(["   "])
+        with self.assertRaises(AIUnavailable) as cm:
+            await answer_question(ai, "Судья", "Что произошло?", {})
+        self.assertEqual(cm.exception.summary, "empty_host_answer")
+
     async def test_non_object_action_plan_is_reported(self):
         ai = FakeAI([["expert"]])
         with self.assertLogs("court.ai.host", level="WARNING") as logs:
@@ -78,17 +103,6 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
                 await plan_action(ai, "Адвокат", {}, [], 50, 25), {"action": "none"}
             )
         self.assertIn("Action plan is not an object (got list)", "\n".join(logs.output))
-
-    async def test_ask_host_returns_bounded_answer(self):
-        ai = FakeAI(["Преступление совершено на складе в 19:50 тупым предметом."])
-        answer = await ask_host(
-            ai,
-            "Адвокат",
-            "Где и чем совершено преступление?",
-            {"phase": "Защита", "evidence": [], "memory": ["Дело открыто"]},
-        )
-        self.assertEqual(ai.calls, 1)
-        self.assertIn("на складе", answer)
 
 
 if __name__ == "__main__":

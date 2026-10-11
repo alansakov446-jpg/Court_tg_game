@@ -95,6 +95,73 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("defense", sql)
             self.assertIn("game_id = 1", sql)
 
+    async def test_private_host_answer_is_saved_in_role_memory_for_replacement(self):
+        self.court.context = AsyncMock(return_value={"memory": ["Известный факт"]})
+        self.court.record = AsyncMock()
+        with patch(
+            "game.service.answer_question",
+            AsyncMock(return_value="Событие произошло на складе."),
+        ) as ask:
+            await self.court.ask_host(
+                self.game,
+                self.p,
+                "Где это произошло?",
+                self.p.user_id,
+                public=False,
+            )
+        self.court.context.assert_awaited_once_with(self.game, self.role)
+        ask.assert_awaited_once_with(
+            self.court.ai,
+            self.role.title,
+            "Где это произошло?",
+            {"memory": ["Известный факт"]},
+        )
+        saved = self.court.record.await_args.args
+        self.assertEqual(saved[0], self.game)
+        self.assertIn("Где это произошло?", saved[1])
+        self.assertIn("Событие произошло на складе.", saved[1])
+        # context() authorizes by role code, so the bot taking over this same
+        # Player/Role reads the persisted answer without a separate memory table.
+        self.assertEqual(saved[2], ["defense"])
+        self.assertIs(saved[3], self.p)
+        sent = self.bot.send_message.await_args.args[1]
+        self.assertIn("сохранён в памяти роли", sent)
+
+    async def test_public_host_question_uses_only_public_context(self):
+        self.court.context = AsyncMock(return_value={"memory": ["Общая реплика"]})
+        self.court.record = AsyncMock()
+        with patch(
+            "game.service.answer_question", AsyncMock(return_value="Это пока не указано.")
+        ):
+            await self.court.ask_host(
+                self.game,
+                self.p,
+                "Какое было орудие?",
+                self.game.chat_id,
+                public=True,
+            )
+        self.court.context.assert_awaited_once_with(self.game, None)
+        self.assertEqual(self.court.record.await_args.args[2], ["public"])
+        self.assertIn("сохранён в общей памяти", self.bot.send_message.await_args.args[1])
+
+    async def test_host_failure_is_reported_without_saving_false_memory(self):
+        self.court.context = AsyncMock(return_value={})
+        self.court.record = AsyncMock()
+        failure = AIUnavailable("нет", summary="http=429")
+        with (
+            patch("game.service.answer_question", AsyncMock(side_effect=failure)),
+            self.assertLogs("court.game", level="WARNING") as logs,
+            self.assertRaisesRegex(ValueError, "временно не ответил"),
+        ):
+            await self.court.ask_host(
+                self.game, self.p, "Кто был рядом?", self.p.user_id
+            )
+        self.court.record.assert_not_awaited()
+        output = "\n".join(logs.output)
+        self.assertIn("Host answer unavailable game=1 role=defense", output)
+        self.assertNotIn("Кто был рядом", output)
+        self.assertNotIn("Игрок", output)
+
     async def test_insufficient_balance_does_not_charge(self):
         wallet = SimpleNamespace(balance=10)
         self.db.scalar = AsyncMock(return_value=wallet)
@@ -177,85 +244,3 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(logs.output)
         self.assertIn("AI vote fallback game=1 role=defense", output)
         self.assertIn("timeout=ReadTimeout x2", output)
-
-    async def test_ask_host_records_memory_and_bot_replacement_inherits_it(self):
-        from game.handlers import handle
-
-        recorded = []
-
-        async def record(game, text, visible, player=None):
-            recorded.append(
-                SimpleNamespace(content=text, visible_to_roles=list(visible))
-            )
-
-        async def context(game, role):
-            return {
-                "phase": "Защита",
-                "evidence": [],
-                "memory": [
-                    s.content
-                    for s in recorded
-                    if set(s.visible_to_roles).intersection(["public", role.code])
-                ],
-            }
-
-        self.court.record = AsyncMock(side_effect=record)
-        self.court.context = AsyncMock(side_effect=context)
-        self.court.active_game = AsyncMock(return_value=self.game)
-        self.court.player = AsyncMock(return_value=self.p)
-        self.court.bot_action = AsyncMock()
-        self.court.ai.generate = AsyncMock(
-            return_value="Совершено на складе ломом; рядом были кладовщик и грузчик."
-        )
-
-        msg = SimpleNamespace(
-            text="/ask где совершено чем совершено кто был что был",
-            chat=SimpleNamespace(id=-100, type="supergroup"),
-            from_user=SimpleNamespace(id=123, is_bot=False),
-        )
-        await handle(msg, self.court)
-
-        self.assertEqual(len(recorded), 1)
-        self.assertIn("defense", recorded[0].visible_to_roles)
-        self.assertIn("Совершено на складе ломом", recorded[0].content)
-        self.bot.send_message.assert_awaited_with(
-            -100,
-            "🎙 Ведущий (Адвокат): Совершено на складе ломом; рядом были кладовщик и грузчик.",
-        )
-
-        # Now replace the human with a bot and verify the bot receives this memory.
-        await self.court.leave(self.game, self.p)
-        self.assertTrue(self.p.is_bot)
-
-        captured_contexts = []
-
-        async def fake_speak(_ai, _role, ctx):
-            captured_contexts.append(ctx)
-            return "Как уже сообщил ведущий, на складе видели кладовщика и грузчика."
-
-        with patch("game.service.speak", AsyncMock(side_effect=fake_speak)):
-            await self.court.bot_turn(self.game, self.p)
-
-        self.assertEqual(len(captured_contexts), 1)
-        memory_text = "\n".join(captured_contexts[0]["memory"])
-        self.assertIn("где совершено чем совершено кто был что был", memory_text)
-        self.assertIn("Совершено на складе ломом", memory_text)
-
-    async def test_ask_host_fallback_is_logged_without_player_data(self):
-        self.game.state = {"crime": "Кража со склада"}
-        self.court.context = AsyncMock(
-            return_value={"phase": "Защита", "evidence": [], "memory": []}
-        )
-        self.court.record = AsyncMock()
-        with (
-            patch("game.service.ask_host", AsyncMock(side_effect=TimeoutError())),
-            self.assertLogs("court.game", level="WARNING") as logs,
-        ):
-            answer = await self.court.ask_host(
-                self.game, self.p, self.role, "Где это было?", private=True
-            )
-        output = "\n".join(logs.output)
-        self.assertIn("Host answer fallback game=1 phase=defense role=defense", output)
-        self.assertNotIn("Игрок", output)
-        self.assertIn("Кража со склада", answer)
-        self.court.record.assert_awaited_once()
