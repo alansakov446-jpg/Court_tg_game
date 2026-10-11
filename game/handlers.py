@@ -17,7 +17,7 @@ HELP = """🏛 Суд — вымышленная судебная игра
 /publish ID — опубликовать свою скрытую улику
 /ask вопрос — спросить ИИ-ведущего; ответ сохранится в памяти
 /call ID — вызвать свидетеля (адвокат/прокурор/судья)
-/question ID вопрос — допросить вызванного свидетеля
+/question ID вопрос — допросить свидетеля (старый /ask ID вопрос тоже работает)
 /object — протест; /objection accept|reject — решение судьи
 /word ID — дать слово; /next — следующая фаза (судья)
 /recuse ID — отвод; повтор команды другими игроками — поддержка
@@ -217,13 +217,31 @@ async def handle(m, c):
             raise ValueError("Вашей ролью управляет бот")
         return
     if cmd == "/ask":
-        return await c.ask_host(
-            game,
-            p,
-            arg,
-            m.chat.id,
-            public=m.chat.type != "private",
+        # Backward compatibility: /ask ID вопрос still interrogates a real
+        # witness in the group. Every other /ask is a question to the AI host.
+        args = arg.split(maxsplit=1)
+        target = (
+            await c.db.get(Player, int(args[0]))
+            if m.chat.type != "private" and args and args[0].isdigit()
+            else None
         )
+        target_role = await c.role(target) if target else None
+        if (
+            target
+            and target.game_id == game.id
+            and target.active
+            and target_role
+            and target_role.code.startswith("witness_")
+        ):
+            cmd = "/question"
+        else:
+            return await c.ask_host(
+                game,
+                p,
+                arg,
+                m.chat.id,
+                public=m.chat.type != "private",
+            )
     if cmd == "/role":
         context = await c.context(game, r)
         await c.send(

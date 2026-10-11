@@ -41,6 +41,9 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             role=AsyncMock(return_value=self.role),
             ask_host=AsyncMock(),
             send=AsyncMock(),
+            public=AsyncMock(),
+            record=AsyncMock(),
+            db=SimpleNamespace(get=AsyncMock(return_value=None)),
         )
 
     @staticmethod
@@ -68,6 +71,25 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.court.ask_host.assert_awaited_once_with(
             self.game, self.player, "", -100, public=True
         )
+
+    async def test_legacy_ask_id_still_interrogates_a_witness(self):
+        witness = Player(id=4, game_id=1, name="Свидетель", active=True, is_bot=False)
+        witness_role = Role(
+            id=5, game_id=1, code="witness_1", title="Свидетель 1", side=None
+        )
+        self.game.state = {"speaker": "witness_1"}
+        self.court.db.get.return_value = witness
+
+        async def role_for(player):
+            return witness_role if player is witness else self.role
+
+        self.court.role.side_effect = role_for
+        await handle(self.message("/ask 4 Что вы видели?"), self.court)
+
+        self.court.ask_host.assert_not_awaited()
+        self.court.record.assert_awaited_once()
+        self.assertIn("Что вы видели?", self.court.record.await_args.args[1])
+        self.court.public.assert_awaited_once()
 
 
 if __name__ == "__main__":

@@ -178,6 +178,7 @@ class Court:
         )
         scope = "общей памяти" if public else "памяти роли"
         await self.send(chat_id, f"🧠 Ведущий: {answer}\n\nОтвет сохранён в {scope}.")
+        return answer
 
     async def new_game(self, message, bots):
         if message.chat.type == "private":
