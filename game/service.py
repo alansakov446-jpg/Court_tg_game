@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 
 from ai.gemini import AIUnavailable, cause
-from ai.host import create_case, plan_action, speak
+from ai.host import ask_host, create_case, plan_action, speak
 from db.models import Economy, Evidence, Game, Player, Role, Statement, utcnow
 from game.rules import (
     DURATIONS,
@@ -133,6 +133,39 @@ class Court:
             "memory": [s.content for s in reversed(statements)],
         }
 
+    async def ask_host(self, game, p, role, question, *, private=False):
+        question = (question or "").strip()
+        if not question:
+            raise ValueError("Укажите вопрос ведущему: /ask вопрос")
+        if len(question) > 1500:
+            raise ValueError("Вопрос до 1500 символов")
+        ctx = await self.context(game, role)
+        if game.state.get("crime") and not any(
+            game.state["crime"] in m for m in ctx.get("memory", [])
+        ):
+            ctx = {**ctx, "crime": game.state["crime"]}
+        try:
+            async with asyncio.timeout(15):
+                answer = await ask_host(self.ai, role.title, question, ctx)
+        except (AIUnavailable, TimeoutError) as exc:
+            log.warning(
+                "Host answer fallback game=%s phase=%s role=%s reason=%s",
+                game.id,
+                game.phase,
+                getattr(role, "code", None),
+                cause(exc),
+            )
+            crime = game.state.get("crime") or "Описание дела в материалах суда."
+            answer = f"Ведущий временно недоступен. Известные материалы дела: {crime}"
+        entry = f"Вопрос ведущему ({role.title}): {question}\nОтвет ведущего: {answer}"
+        visible = [role.code] if private else ["public", role.code]
+        await self.record(game, entry, visible, p)
+        await self.send(
+            p.user_id if private else game.chat_id,
+            f"🎙 Ведущий ({role.title}): {answer}",
+        )
+        return answer
+
     async def new_game(self, message, bots):
         if message.chat.type == "private":
             return await self.send(
@@ -219,6 +252,13 @@ class Court:
             p.active = False
         elif game.status == "running":
             p.is_bot, p.permanent = True, True
+            r = await self.role(p)
+            if r and game.state.get("speaker") == r.code:
+                change(
+                    game,
+                    bot_spoken=False,
+                    bot_due=(utcnow() + timedelta(seconds=5)).isoformat(),
+                )
             await self.public(
                 game,
                 f"{p.name}: я не вывожу, заменяй меня ботом. Роль закреплена за ботом.",
@@ -433,6 +473,12 @@ class Court:
                 "justified": target.violations > 0,
             }
         change(game, removals=removals)
+        if game.state.get("speaker") == r.code:
+            change(
+                game,
+                bot_spoken=False,
+                bot_due=(utcnow() + timedelta(seconds=5)).isoformat(),
+            )
         await self.public(
             game,
             f"{r.title} заменён ботом с теми же знаниями. "

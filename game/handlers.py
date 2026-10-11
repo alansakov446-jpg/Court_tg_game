@@ -13,6 +13,7 @@ HELP = """🏛 Суд — вымышленная судебная игра
 /extend 30 — продлить (предел 5 минут от создания)
 /startnow, /stop — создатель зала или администратор
 /players, /evidence, /balance — участники и материалы
+/ask вопрос — спросить ИИ-ведущего об обстоятельствах дела
 /expert ID — экспертиза за деньги стороны
 /publish ID — опубликовать свою скрытую улику
 /call ID — вызвать свидетеля (адвокат/прокурор/судья)
@@ -28,6 +29,7 @@ HELP = """🏛 Суд — вымышленная судебная игра
 В ЛС:
 /games, /use ID — выбрать игру при участии в нескольких
 /role — своя роль и доступные знания
+/ask вопрос — спросить ИИ-ведущего лично (сохраняется в память роли)
 /say anon|public текст — присяжный пишет судье в ЛС
 /sayto ID текст — личное сообщение другому присяжному
 """
@@ -225,6 +227,24 @@ async def handle(m, c):
         return await c.show_evidence(game, p.user_id, r)
     if cmd == "/evidence":
         return await c.show_evidence(game, m.chat.id, r)
+    if cmd == "/ask":
+        args = arg.split(maxsplit=1)
+        target = (
+            await c.db.get(Player, int(args[0]))
+            if m.chat.type != "private" and args and args[0].isdigit()
+            else None
+        )
+        tr = await c.role(target) if target else None
+        if (
+            not target
+            or target.game_id != game.id
+            or not target.active
+            or not tr
+            or not tr.code.startswith("witness_")
+        ):
+            return await c.ask_host(
+                game, p, r, arg, private=(m.chat.type == "private")
+            )
     if cmd in ("/say", "/sayto"):
         if m.chat.type != "private" or not r.code.startswith("juror_"):
             raise ValueError("Переписка присяжных работает в ЛС бота")

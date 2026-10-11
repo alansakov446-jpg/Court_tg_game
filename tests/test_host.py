@@ -1,7 +1,7 @@
 import unittest
 
 from ai.gemini import AIUnavailable
-from ai.host import create_case, plan_action
+from ai.host import ask_host, create_case, plan_action
 from game.rules import role_specs
 
 CODES = [spec[0] for spec in role_specs(9)]
@@ -78,6 +78,17 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
                 await plan_action(ai, "Адвокат", {}, [], 50, 25), {"action": "none"}
             )
         self.assertIn("Action plan is not an object (got list)", "\n".join(logs.output))
+
+    async def test_ask_host_returns_bounded_answer(self):
+        ai = FakeAI(["Преступление совершено на складе в 19:50 тупым предметом."])
+        answer = await ask_host(
+            ai,
+            "Адвокат",
+            "Где и чем совершено преступление?",
+            {"phase": "Защита", "evidence": [], "memory": ["Дело открыто"]},
+        )
+        self.assertEqual(ai.calls, 1)
+        self.assertIn("на складе", answer)
 
 
 if __name__ == "__main__":
