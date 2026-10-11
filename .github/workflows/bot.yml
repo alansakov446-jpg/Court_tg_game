@@ -4,22 +4,26 @@ on:
   push:
     branches: [main]
   schedule:
-    # GitHub Actions supports a minimum interval of 5 minutes, not */1.
-    - cron: '*/5 * * * *'
+    # Recovery trigger only. A healthy run queues its successor itself because
+    # GitHub's cron has previously arrived 3–7 hours late in this repository.
+    - cron: '*/30 * * * *'
 permissions:
   contents: read
+  # Needed only for the final workflow_dispatch hand-off to the next window.
+  actions: write
 concurrency:
   group: court-telegram-poller
   cancel-in-progress: false
 jobs:
   bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # Poll for 50 minutes, leaving 8 minutes for setup, reports and the hand-off.
+    timeout-minutes: 58
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       GEMINI_API: ${{ secrets.GEMINI_API }}
-      RUN_SECONDS: '600'
+      RUN_SECONDS: '3000'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -141,7 +145,29 @@ jobs:
           {
             echo '## Telegram polling window completed'
             echo ''
-            echo 'This run polls Telegram for up to 600 seconds and then exits successfully;'
+            echo 'This run polls Telegram for up to 3000 seconds and then exits successfully;'
             echo 'the health validator has confirmed at least one completed get_updates cycle.'
-            echo 'The next run is started by the 5-minute schedule, a push to main, or manual dispatch.'
+            echo 'The final step queues the next window immediately; the 30-minute cron is only recovery.'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Queue next polling window
+        # workflow_dispatch events created with GITHUB_TOKEN are allowed to start
+        # workflows. concurrency keeps one poller active and one hand-off pending.
+        # Queue even after a transient failure so cron delay cannot put the bot to sleep.
+        if: ${{ always() && github.ref_name == github.event.repository.default_branch }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f health.json ] && [ "$(jq -r '.lock // empty' health.json)" = 'busy' ]; then
+            echo 'Another long-running poller owns the lock; not creating an Actions retry loop.'
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            if gh workflow run bot.yml --ref "$GITHUB_REF_NAME"; then
+              echo "Queued the next polling window (attempt $attempt)."
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo 'Failed to queue the next polling window; the recovery cron remains enabled.'
+          exit 1

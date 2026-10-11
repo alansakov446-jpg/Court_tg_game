@@ -95,6 +95,73 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("defense", sql)
             self.assertIn("game_id = 1", sql)
 
+    async def test_private_host_answer_is_saved_in_role_memory_for_replacement(self):
+        self.court.context = AsyncMock(return_value={"memory": ["Известный факт"]})
+        self.court.record = AsyncMock()
+        with patch(
+            "game.service.answer_question",
+            AsyncMock(return_value="Событие произошло на складе."),
+        ) as ask:
+            await self.court.ask_host(
+                self.game,
+                self.p,
+                "Где это произошло?",
+                self.p.user_id,
+                public=False,
+            )
+        self.court.context.assert_awaited_once_with(self.game, self.role)
+        ask.assert_awaited_once_with(
+            self.court.ai,
+            self.role.title,
+            "Где это произошло?",
+            {"memory": ["Известный факт"]},
+        )
+        saved = self.court.record.await_args.args
+        self.assertEqual(saved[0], self.game)
+        self.assertIn("Где это произошло?", saved[1])
+        self.assertIn("Событие произошло на складе.", saved[1])
+        # context() authorizes by role code, so the bot taking over this same
+        # Player/Role reads the persisted answer without a separate memory table.
+        self.assertEqual(saved[2], ["defense"])
+        self.assertIs(saved[3], self.p)
+        sent = self.bot.send_message.await_args.args[1]
+        self.assertIn("сохранён в памяти роли", sent)
+
+    async def test_public_host_question_uses_only_public_context(self):
+        self.court.context = AsyncMock(return_value={"memory": ["Общая реплика"]})
+        self.court.record = AsyncMock()
+        with patch(
+            "game.service.answer_question", AsyncMock(return_value="Это пока не указано.")
+        ):
+            await self.court.ask_host(
+                self.game,
+                self.p,
+                "Какое было орудие?",
+                self.game.chat_id,
+                public=True,
+            )
+        self.court.context.assert_awaited_once_with(self.game, None)
+        self.assertEqual(self.court.record.await_args.args[2], ["public"])
+        self.assertIn("сохранён в общей памяти", self.bot.send_message.await_args.args[1])
+
+    async def test_host_failure_is_reported_without_saving_false_memory(self):
+        self.court.context = AsyncMock(return_value={})
+        self.court.record = AsyncMock()
+        failure = AIUnavailable("нет", summary="http=429")
+        with (
+            patch("game.service.answer_question", AsyncMock(side_effect=failure)),
+            self.assertLogs("court.game", level="WARNING") as logs,
+            self.assertRaisesRegex(ValueError, "временно не ответил"),
+        ):
+            await self.court.ask_host(
+                self.game, self.p, "Кто был рядом?", self.p.user_id
+            )
+        self.court.record.assert_not_awaited()
+        output = "\n".join(logs.output)
+        self.assertIn("Host answer unavailable game=1 role=defense", output)
+        self.assertNotIn("Кто был рядом", output)
+        self.assertNotIn("Игрок", output)
+
     async def test_insufficient_balance_does_not_charge(self):
         wallet = SimpleNamespace(balance=10)
         self.db.scalar = AsyncMock(return_value=wallet)

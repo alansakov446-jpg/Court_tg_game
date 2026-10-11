@@ -104,6 +104,42 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(p.is_bot)
             self.assertTrue(p.permanent)
 
+    async def test_private_ask_memory_survives_bot_replacement_and_reconnect(self):
+        async with self.sessions() as session, session.begin():
+            game = await self.create_game(session)
+            player = Player(game_id=game.id, user_id=123, name="Игрок")
+            session.add(player)
+            await session.flush()
+            court = Court(session, self.bot, self.ai, "test_bot")
+            await court.start(game)
+            with patch(
+                "game.service.answer_question",
+                AsyncMock(return_value="Событие произошло в галерее."),
+            ):
+                await court.ask_host(
+                    game,
+                    player,
+                    "Где произошло событие?",
+                    player.user_id,
+                    public=False,
+                )
+            player.is_bot = True
+            gid, pid = game.id, player.id
+
+        # A fresh worker/session sees the persisted role-scoped Q&A. The bot
+        # replacing the human receives this exact context on its next turn.
+        async with self.sessions() as session:
+            game = await session.get(Game, gid)
+            player = await session.get(Player, pid)
+            role = await session.get(Role, player.role_id)
+            context = await Court(session, self.bot, self.ai, "test_bot").context(
+                game, role
+            )
+            self.assertTrue(player.is_bot)
+            memory = "\n".join(context["memory"])
+            self.assertIn("Где произошло событие?", memory)
+            self.assertIn("Событие произошло в галерее.", memory)
+
     async def test_exact_case_duplicate_never_repeats_the_case(self):
         async with self.sessions() as session, session.begin():
             first = await self.create_game(session)
