@@ -1,7 +1,7 @@
 import unittest
 
 from ai.gemini import AIUnavailable
-from ai.host import answer_question, create_case, plan_action
+from ai.host import answer_question, create_case, plan_action, speak
 from game.rules import role_specs
 
 CODES = [spec[0] for spec in role_specs(9)]
@@ -95,6 +95,35 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AIUnavailable) as cm:
             await answer_question(ai, "Судья", "Что произошло?", {})
         self.assertEqual(cm.exception.summary, "empty_host_answer")
+
+    async def test_speech_returns_the_text_and_the_done_signal(self):
+        ai = FakeAI([{"speech": "Защита доказала алиби.", "done": True}])
+        text, done = await speak(ai, "Адвокат", {"phase": "Защита"})
+        self.assertEqual(text, "Защита доказала алиби.")
+        self.assertTrue(done)
+        prompt = ai.prompts[0]
+        self.assertIn('"speech"', prompt)
+        self.assertIn('"done"', prompt)
+        self.assertIn("передать слово", prompt)
+
+    async def test_speech_without_an_explicit_signal_keeps_the_turn(self):
+        for answer in ({"speech": "Речь"}, {"speech": "Речь", "done": "yes"}):
+            text, done = await speak(FakeAI([answer]), "Прокурор", {})
+            self.assertEqual(text, "Речь")
+            self.assertFalse(done, answer)
+        # A shape the contract does not describe is a failure, not a handover.
+        with self.assertRaises(AIUnavailable):
+            await speak(FakeAI([["Речь"]]), "Прокурор", {})
+
+    async def test_speech_is_bounded_and_an_empty_answer_is_a_failure(self):
+        ai = FakeAI([{"speech": "я" * 900, "done": False}])
+        text, _ = await speak(ai, "Прокурор", {})
+        self.assertEqual(len(text), 600)
+        with self.assertLogs("court.ai.host", level="WARNING") as logs:
+            with self.assertRaises(AIUnavailable) as cm:
+                await speak(FakeAI([{"speech": "   "}]), "Судья", {})
+        self.assertEqual(cm.exception.summary, "empty_speech")
+        self.assertIn("Speech answer is unusable", "\n".join(logs.output))
 
     async def test_non_object_action_plan_is_reported(self):
         ai = FakeAI([["expert"]])

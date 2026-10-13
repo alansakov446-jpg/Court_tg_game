@@ -1,4 +1,5 @@
 import hashlib
+import os
 import re
 from datetime import timedelta
 
@@ -38,6 +39,87 @@ SPEAKERS = {
     "final": "accused",
     "verdict": "judge",
 }
+# A speaker may finish the turn early in these phases: the word goes on at once
+# instead of waiting for the phase deadline (/pass, the button, the bot signal).
+HANDOVER_PHASES = ("accusation", "defense", "debate")
+# Who argues against whom: the sides exchange the floor inside the debate.
+OPPOSITES = {"prosecutor": "defense", "defense": "prosecutor"}
+SEATS = len(BASE_ROLES)
+ROLE_PREVIEW = "судья, прокурор, адвокат, подсудимый, 2 свидетеля, 3 присяжных"
+
+
+# Spoken forms of "I am done": the direct request (/pass and its aliases) and
+# the natural phrases a player types when the speech is over. A phrase only
+# counts as the whole message, so ordinary speeches never trigger a handover.
+FINISH = re.compile(
+    r"^\W*(?:"
+    r"/(?:pass|done|next)"
+    r"|(?:ну\s+|и\s+)?(?:на\s+этом\s+)?(?:у\s+меня\s+)?(?:я\s+|мы\s+)?"
+    r"(?:всё|все|закончил\w*|заканчиваю|высказал\w*|"
+    r"всё\s+сказал\w*|сказал\w*\s+всё|закончим|заканчиваем)"
+    r"|у\s+меня\s+нет\s+(?:вопросов|что\s+сказать)"
+    r"|(?:мне\s+)?(?:больше\s+)?нечего\s+(?:добавить|сказать)"
+    r"|переда\w*\s+слово"
+    r")\W*$",
+    re.IGNORECASE,
+)
+
+
+def finish_phrase(text):
+    """Is this the player's signal that the turn is over?"""
+    return bool(FINISH.match((text or "").strip()))
+
+
+# In a group every bot receives every "/command" written by anyone, so the bot
+# answers only when the command is addressed to it: /pass@court_bot. Telegram
+# inserts the name automatically when a command is picked from the "/" menu.
+# GROUP_COMMANDS_NEED_MENTION=0 restores bare commands for single-bot chats.
+FALSEY = {"", "0", "false", "no", "off"}
+
+
+def commands_need_mention(environ=None):
+    env = os.environ if environ is None else environ
+    return str(env.get("GROUP_COMMANDS_NEED_MENTION", "1")).strip().lower() not in FALSEY
+
+
+def route_command(text, chat_type, username, *, mention_required=None):
+    """What this message means for this bot: ("text"|"command"|"ignore", cmd, arg).
+
+    Ordinary speech is always "text". A command for another bot, and a bare
+    command in a group when mentions are required, are "ignore": the chat gets
+    no "no such command" reply, which is exactly what multi-bot groups need.
+    """
+    if mention_required is None:
+        mention_required = commands_need_mention()
+    head, _, argument = (text or "").strip().partition(" ")
+    name, _, target = head.partition("@")
+    if not name.startswith("/"):
+        return "text", "", (text or "").strip()
+    if target and target.casefold() != (username or "").casefold():
+        return "ignore", "", ""  # written for another bot in the same chat
+    if not target and chat_type != "private" and mention_required:
+        return "ignore", "", ""  # in a group the command must name this bot
+    return "command", name.casefold(), argument.strip()
+
+
+def floor_after(phase, code):
+    """Where the floor goes when the current speaker finishes early.
+
+    Returns ``("role", code)`` — the word stays inside the running phase, or
+    ``("phase", name)`` — the speaker's whole part is over and the hearing
+    moves to the next phase at once. Only side roles use this: a witness is
+    routed back to the questioner by the caller.
+    """
+    if phase in ("accusation", "defense"):
+        own = "prosecutor" if phase == "accusation" else "defense"
+        if code == own:
+            return ("phase", PHASES[PHASES.index(phase) + 1])
+        return ("role", own)
+    if phase == "debate":
+        return ("role", OPPOSITES.get(code, "judge"))
+    if phase == "final":
+        return ("phase", "verdict")
+    return ("role", "judge")
 
 
 def role_specs(count):
