@@ -6,15 +6,15 @@ Keys, prompts, answers, case text and truth are never logged or stored.
 - keys configured: 5
 - models: gemini-3.8-flash, gemini-3.5-flash-lite
 - create_case timeout: 60s (same as the poller)
-- result: failed
+- result: accepted
 
 ## Probe log lines
 
 ```
 court.probe INFO Probe start keys_configured=5 models=gemini-3.8-flash,gemini-3.5-flash-lite case_timeout=60s
 court.probe INFO Shape probe start configs=6 models=gemini-3.8-flash,gemini-3.5-flash-lite
-court.probe INFO Shape probe model=gemini-3.8-flash config=bare_800 OK
-court.probe WARNING Shape probe model=gemini-3.8-flash config=max6000 http=503 UNAVAILABLE message='This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.'
+court.probe WARNING Shape probe model=gemini-3.8-flash config=bare_800 network=ReadTimeout
+court.probe WARNING Shape probe model=gemini-3.8-flash config=max6000 network=ReadTimeout
 court.probe WARNING Shape probe model=gemini-3.8-flash config=mime network=ReadTimeout
 court.probe WARNING Shape probe model=gemini-3.8-flash config=think0 network=ReadTimeout
 court.probe WARNING Shape probe model=gemini-3.8-flash config=think1024 network=ReadTimeout
@@ -27,10 +27,9 @@ court.probe INFO Shape probe model=gemini-3.5-flash-lite config=think1024 OK
 court.probe WARNING Shape probe model=gemini-3.5-flash-lite config=full_case http=400 INVALID_ARGUMENT message='Request contains an invalid argument.'
 court.ai WARNING Gemini attempt failed model=gemini-3.8-flash key=#0 timeout=ReadTimeout prompt_chars=918 limit=30s
 court.ai INFO Gemini slim config accepted model=gemini-3.5-flash-lite key=#0
-court.ai.host WARNING Case draft rejected attempt=1/3 roles=9 reason=Неверная видимость
-court.ai.host WARNING Case draft rejected attempt=2/3 roles=9 reason=Неверная видимость
-court.probe ERROR Probe case failed reason=TimeoutError after 60s
-court.probe INFO Probe done result=failed elapsed=230.0s
+court.ai.host INFO Case draft accepted attempt=1/3 roles=9 evidence=6
+court.probe INFO Probe case accepted evidence=6 roles_required=9 crime_chars=271
+court.probe INFO Probe done result=accepted elapsed=217.9s
 ```
 ## Recent Court bot runs (sanitized excerpts)
 
