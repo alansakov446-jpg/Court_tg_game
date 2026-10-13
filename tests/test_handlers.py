@@ -407,3 +407,35 @@ class CommandRoutingTests(unittest.TestCase):
             self.assertFalse(
                 commands_need_mention({"GROUP_COMMANDS_NEED_MENTION": value}), value
             )
+
+
+class StateCommandTests(unittest.IsolatedAsyncioTestCase):
+    """Anyone in the chat may ask who is speaking, even without a role."""
+
+    async def test_state_works_for_a_participant_and_for_a_stranger(self):
+        game = Game(
+            id=1,
+            chat_id=-100,
+            title="Тестовый суд",
+            creator_id=10,
+            status="running",
+            phase="debate",
+            deadline=utcnow(),
+            state={"speaker": "defense"},
+        )
+        court = SimpleNamespace(
+            username="court_bot",
+            active_game=AsyncMock(return_value=game),
+            player=AsyncMock(return_value=None),
+            role=AsyncMock(return_value=None),
+            send=AsyncMock(),
+            turn_state_text=AsyncMock(return_value="Слово: Адвокат. Осталось 1:30."),
+        )
+        message = SimpleNamespace(
+            text="/state@court_bot",
+            chat=SimpleNamespace(id=-100, type="supergroup", title="Тестовый суд"),
+            from_user=SimpleNamespace(id=99, full_name="Зритель", is_bot=False),
+        )
+        await handle(message, court)
+        court.turn_state_text.assert_awaited_once_with(game)
+        self.assertIn("Слово: Адвокат", court.send.await_args.args[1])

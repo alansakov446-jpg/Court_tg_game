@@ -315,6 +315,9 @@ async def handle(m, c):
                 + (" • сейчас говорит" if r.code == game.state.get("speaker") else "")
             )
         return await c.send(m.chat.id, "\n".join(lines))
+    if cmd == "/state":
+        # Anyone in the chat may ask who is speaking; no role is required.
+        return await c.send(m.chat.id, await c.turn_state_text(game))
     if cmd == "/balance":
         wallets = (
             await c.db.scalars(select(Economy).where(Economy.game_id == game.id))
@@ -551,8 +554,6 @@ async def handle(m, c):
         change(game, final_spoken=True)
         await c.record(game, f"Финальное слово: {arg}", ["public"], p)
         return await c.public(game, f"Финальное слово подсудимого: {arg}")
-    if cmd == "/state":
-        return await c.send(m.chat.id, await c.turn_state_text(game))
     if cmd.startswith("/"):
         # Command names are shown the way the bot will hear them in this chat.
         return await c.send(
@@ -565,8 +566,10 @@ async def handle(m, c):
             "Вы уже сказали финальное слово. Закончили — напишите «я всё» "
             "или нажмите кнопку, и суд перейдёт к вердикту."
             if game.state.get("final_spoken")
-            else f"Для финального слова: {c.cmd('final')} текст "
-            "(до 200 символов). Закончили — напишите «я всё».",
+            else (
+                f"Для финального слова: {c.cmd('final')} текст "
+                "(до 200 символов). Закончили — напишите «я всё»."
+            ),
         )
     # «Я всё», «на этом у меня всё»: the speaker ends the turn, the court hands
     # the word over at once. Anyone else falls through to the usual penalty path.
