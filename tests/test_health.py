@@ -194,6 +194,7 @@ def fake_bot():
     return SimpleNamespace(
         get_me=AsyncMock(return_value=SimpleNamespace(username="testbot")),
         delete_webhook=AsyncMock(),
+        set_my_commands=AsyncMock(),
         get_updates=AsyncMock(return_value=[]),
         session=SimpleNamespace(close=AsyncMock()),
     )
@@ -242,10 +243,11 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health["poll_cycles"], 0)
 
     async def test_normal_window_is_successful_and_reports_health(self):
+        bot = fake_bot()
         await main.run(
             engine=FakeEngine(),
             sessions=self.sessions,
-            bot=fake_bot(),
+            bot=bot,
             ai=SimpleNamespace(close=AsyncMock()),
             duration=1,
         )
@@ -253,6 +255,9 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health["status"], "ok")
         self.assertEqual(health["lock"], "ok")
         self.assertEqual(health["bot"], "@testbot")
+        # The "/" menu is published for groups and private chats on every window.
+        self.assertTrue(health["commands"])
+        self.assertEqual(bot.set_my_commands.await_count, 2)
         self.assertGreaterEqual(health["poll_cycles"], 1)
         self.assertEqual(health["updates_seen"], 0)
         self.assertEqual(health["updates_handled"], 0)

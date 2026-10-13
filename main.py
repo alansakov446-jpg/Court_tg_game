@@ -28,7 +28,7 @@ from sqlalchemy import select, text
 from ai.gemini import Gemini, cause
 from db.models import Game
 from db.session import connect
-from game.handlers import router
+from game.handlers import install_commands, router
 from game.service import Court
 from scripts.healthz import verdict
 
@@ -191,6 +191,7 @@ async def run(*, engine=None, sessions=None, bot=None, ai=None, duration=None):
     health = {
         "bot": None,
         "lock": "pending",
+        "commands": None,
         "poll_cycles": 0,
         "updates_seen": 0,
         "updates_handled": 0,
@@ -235,6 +236,9 @@ async def run(*, engine=None, sessions=None, bot=None, ai=None, duration=None):
             username = (await bot.get_me()).username
             health["bot"] = f"@{username}"
             await bot.delete_webhook(drop_pending_updates=False)
+            # The "/" menu is refreshed on every window, so a restart or a new
+            # deployment is enough to publish a changed command list.
+            health["commands"] = await install_commands(bot)
             offset, offset_source = await load_offset(sessions)
             health["offset"] = offset
             health["offset_source"] = offset_source
@@ -255,12 +259,13 @@ async def run(*, engine=None, sessions=None, bot=None, ai=None, duration=None):
                     type(exc).__name__,
                 )
             log.info(
-                "Polling started as @%s (%s) offset=%d source=%s start_lag=%d",
+                "Polling started as @%s (%s) offset=%d source=%s start_lag=%d commands=%s",
                 username,
                 f"{duration}s limit" if duration else "continuous",
                 offset,
                 offset_source,
                 health["start_lag"],
+                health["commands"],
             )
             health["status"] = "ok"
             while time.monotonic() < end:

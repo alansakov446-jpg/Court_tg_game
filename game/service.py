@@ -1,7 +1,9 @@
 import asyncio
+import html
 import logging
 import random
-from datetime import timedelta
+import re
+from datetime import datetime, timedelta
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,18 +14,32 @@ from ai.host import answer_question, create_case, plan_action, speak
 from db.models import Economy, Evidence, Game, Player, Role, Statement, utcnow
 from game.rules import (
     DURATIONS,
+    HANDOVER_PHASES,
     LABELS,
     PHASES,
+    ROLE_PREVIEW,
+    SEATS,
     SPEAKERS,
+    commands_need_mention,
     explain_failure,
     fallback_case,
     fingerprint,
+    floor_after,
     role_specs,
 )
 
 # AI failures are logged here with a technical cause only: no keys, prompts,
 # provider answers, chat text, case content or player names.
 log = logging.getLogger("court.game")
+
+# A handover is a conscious act, not a reflex: two taps in a row are refused.
+HANDOVER_GAP = 5
+# Guards the AI quota: a bot may finish early, but not ping-pong forever.
+MAX_HANDOVERS = 6
+# The speaker gets the turn, and a bot answers shortly after that.
+BOT_TURN_DELAY = 8
+# Plain text for the rare retry without parse_mode (HTML is only used for mentions).
+TAGS = re.compile(r"</?(?:a|b|i|u|s|code|pre|tg-spoiler)(?:\s[^>]*)?>", re.IGNORECASE)
 
 
 def change(game, **values):
@@ -45,16 +61,45 @@ class Court:
 
     async def send(self, chat, text, **kwargs):
         try:
-            await self.bot.send_message(chat, text[:4000], **kwargs)
-            return True
-        except (TelegramForbiddenError, TelegramBadRequest):
-            return False
+            return await self.bot.send_message(chat, text[:4000], **kwargs)
+        except TelegramBadRequest:
+            if "parse_mode" not in kwargs:
+                return None
+            # Mentions are decoration: a malformed one must not swallow the message.
+            fallback = {key: value for key, value in kwargs.items() if key != "parse_mode"}
+            try:
+                return await self.bot.send_message(
+                    chat, TAGS.sub("", text)[:4000], **fallback
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                return None
+        except TelegramForbiddenError:
+            return None
 
-    async def public(self, game, text, **kwargs):
+    async def public(self, game, text, *, memory=None, **kwargs):
+        # The chat may see speaker mentions (HTML), the durable memory keeps plain
+        # text: statements are fed back to the AI and never carry markup.
         self.db.add(
-            Statement(game_id=game.id, content=text, visible_to_roles=["public"])
+            Statement(game_id=game.id, content=memory or text, visible_to_roles=["public"])
         )
         await self.send(game.chat_id, text, **kwargs)
+
+    def mention(self, player, title=None):
+        """Ping the speaking human by name; bots have no user_id to mention."""
+        if not player or not player.user_id or not (player.name or ""):
+            return title or ""
+        name = html.escape(player.name)
+        return f'<a href="tg://user?id={player.user_id}">{name}</a>'
+
+    def cmd(self, name, *, group=True):
+        """How players must write this command for the bot to hear it.
+
+        Group messages go to every bot in the chat, so in a group the command
+        names this bot (/final@court_bot); private replies stay short.
+        """
+        if group and commands_need_mention():
+            return f"/{name}@{self.username}"
+        return f"/{name}"
 
     async def active_game(self, chat_id):
         return await self.db.scalar(
@@ -62,6 +107,76 @@ class Court:
             .where(Game.chat_id == chat_id, Game.status.in_(["lobby", "running"]))
             .order_by(Game.id.desc())
         )
+
+    def join_markup(self, game):
+        link = f"https://t.me/{self.username}?start=join_{game.chat_id}_{game.id}"
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Вступить", url=link)],
+                [
+                    InlineKeyboardButton(
+                        text="Выйти досрочно", callback_data=f"leave:{game.id}"
+                    )
+                ],
+            ]
+        )
+
+    async def lobby_card(self, game, closing=False):
+        """The single lobby message: exactly who is already in the hall."""
+        people = await self.players(game)
+        bots = int(game.state.get("requested_bots", 0) or 0)
+        lines = [f"🏛 Зал суда «{game.title}» • партия #{game.id}"]
+        if closing:
+            lines.append("🔒 Набор закрыт, дело открыто.")
+        else:
+            left = max(0, int((game.deadline - utcnow()).total_seconds()))
+            lines.append(f"⏳ До старта: {left // 60}:{left % 60:02d}")
+        lines.append(f"👥 В зале ({len(people)}):")
+        lines += (
+            [
+                f"{i}. {p.name}{' [бот]' if p.is_bot else ''}"
+                for i, p in enumerate(people, 1)
+            ]
+            or ["пока никого"]
+        )
+        if not closing:
+            free = max(0, SEATS - len(people))
+            lines.append(f"Свободных мест: {free}. Пустые роли займут боты (заказано: {bots}).")
+            lines.append(f"Роли при старте: {ROLE_PREVIEW}.")
+            lines.append(
+                f"Каждый вступает кнопкой в ЛС бота. {self.cmd('lobby')} обновит эту карточку."
+            )
+        return "\n".join(lines)
+
+    async def refresh_lobby(self, game, *, closing=False):
+        """Keep the lobby card in sync with the players who actually joined.
+
+        One message is edited instead of a new one per join, so a long lobby
+        does not bury the chat; if Telegram refuses the edit (deleted message,
+        lost rights), a fresh card is posted below.
+        """
+        text = await self.lobby_card(game, closing=closing)
+        markup = None if closing else self.join_markup(game)
+        message_id = game.state.get("lobby_message")
+        if message_id:
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=game.chat_id,
+                    message_id=message_id,
+                    text=text[:4000],
+                    reply_markup=markup,
+                )
+                return
+            except (TelegramBadRequest, TelegramForbiddenError):
+                pass
+        if closing:
+            return
+        sent = await self.send(game.chat_id, text, reply_markup=markup)
+        message_id = getattr(sent, "message_id", None)
+        # Only a real id may enter state: the column is JSONB and every later
+        # edit depends on this value.
+        if isinstance(message_id, int):
+            change(game, lobby_message=message_id)
 
     async def players(self, game):
         return list(
@@ -166,7 +281,8 @@ class Court:
                 cause(exc),
             )
             raise ValueError(
-                "ИИ-ведущий временно не ответил. Попробуйте /ask ещё раз."
+                "ИИ-ведущий временно не ответил. Попробуйте "
+                f"{self.cmd('ask')} ещё раз."
             ) from None
         visible = ["public"] if public else [role.code]
         await self.record(
@@ -188,7 +304,7 @@ class Court:
         if await self.active_game(message.chat.id):
             return await self.send(message.chat.id, "Зал уже открыт.")
         if not 0 <= bots <= 9:
-            raise ValueError("/game [число ботов от 0 до 9]")
+            raise ValueError(f"{self.cmd('game')} [число ботов от 0 до 9]")
         now = utcnow()
         game = Game(
             chat_id=message.chat.id,
@@ -209,24 +325,15 @@ class Court:
             int((game.deadline - now).total_seconds()),
         )
         # Payload includes both chat and game; old invitations cannot join a different game.
-        link = f"https://t.me/{self.username}?start=join_{game.chat_id}_{game.id}"
-        markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Вступить", url=link)],
-                [
-                    InlineKeyboardButton(
-                        text="Выйти досрочно", callback_data=f"leave:{game.id}"
-                    )
-                ],
-            ]
-        )
         await self.send(
             game.chat_id,
             "🏛 Зал суда открыт на 2 минуты 30 секунд!\n"
             f"Добавлено ботов: {bots}. Пустые роли заполнятся автоматически.\n"
             "Каждый, включая создателя, вступает кнопкой через ЛС.",
-            reply_markup=markup,
+            reply_markup=self.join_markup(game),
         )
+        # The card below is the live list of who is already in the hall.
+        await self.refresh_lobby(game)
 
     async def join(self, message, payload):
         try:
@@ -253,10 +360,20 @@ class Court:
                 active=True,
             )
             self.db.add(p)
+        await self.db.flush()
+        await self.refresh_lobby(game)
+        left = max(0, int((game.deadline - utcnow()).total_seconds()))
         await self.send(
             message.chat.id,
             f'Ты присоединился к залу суда чата "{game.title}"',
             reply_markup=keyboard([("Выйти досрочно", f"leave:{game.id}")]),
+        )
+        # Everyone in the group sees the new participant; the button stays at hand.
+        await self.send(
+            game.chat_id,
+            f"➕ {message.from_user.full_name[:100]} в зале суда. "
+            f"Участников: {len(await self.players(game))}. До старта {left} сек.",
+            reply_markup=self.join_markup(game),
         )
 
     async def leave(self, game, p):
@@ -264,6 +381,8 @@ class Court:
             raise ValueError("Вы не в этом зале")
         if game.status == "lobby":
             p.active = False
+            await self.db.flush()
+            await self.refresh_lobby(game)
         elif game.status == "running":
             p.is_bot, p.permanent = True, True
             await self.public(
@@ -375,6 +494,8 @@ class Court:
                 for p, r in zip(people, roles)
             ),
         )
+        # The lobby card stops accepting players and shows the final roster.
+        await self.refresh_lobby(game, closing=True)
         await self.set_phase(game, "crime")
 
     async def set_phase(self, game, phase):
@@ -382,32 +503,50 @@ class Court:
         game.phase, game.deadline = phase, now + timedelta(seconds=DURATIONS[phase])
         change(
             game,
-            speaker=SPEAKERS[phase],
-            last_activity=now.isoformat(),
-            silence=0,
+            **self.turn_state(game, SPEAKERS[phase]),
             questioner=None,
-            bot_due=(now + timedelta(seconds=8)).isoformat(),
-            bot_spoken=False,
             objection=None,
+            handovers=0,
+            last_handover=None,
+        )
+        speaker = await self.by_code(game, SPEAKERS[phase])
+        title = (await self.role(speaker)).title if speaker else SPEAKERS[phase]
+        voice = self.mention(speaker, title)
+        rows = []
+        if phase in HANDOVER_PHASES or phase == "final":
+            rows.append([("🗣 Я всё, передать слово", f"pass:{game.id}")])
+        rows.append([("Протестую!", f"object:{game.id}")])
+        hint = (
+            " Закончили — напишите «я всё» или нажмите кнопку."
+            if phase in HANDOVER_PHASES
+            else ""
         )
         await self.public(
             game,
             f"⚖️ {LABELS[phase]}. На фазу {DURATIONS[phase]} сек. "
-            f"Слово: {SPEAKERS[phase]}.",
-            reply_markup=keyboard([("Протестую!", f"object:{game.id}")]),
+            f"Слово: {voice}.{hint}",
+            memory=f"⚖️ {LABELS[phase]}. На фазу {DURATIONS[phase]} сек. "
+            f"Слово: {title}.",
+            reply_markup=keyboard(*rows),
+            **({"parse_mode": "HTML"} if voice != title else {}),
         )
         if phase == "crime":
             await self.show_evidence(game, game.chat_id)
         if phase == "final":
             await self.public(
                 game,
-                "Подсудимый: /final текст — до 200 символов. Судья не может пропустить это слово.",
+                f"Подсудимый: {self.cmd('final')} текст — до 200 символов. "
+                "Судья не может пропустить это слово. После финального слова "
+                "напишите «я всё» — суд сразу перейдёт к вердикту.",
             )
         if phase == "verdict":
             await self.public(
                 game,
-                "Присяжные образуют фракцию: /vote guilty или /vote innocent.\n"
-                "Судья: /verdict guilty или /verdict innocent. Голосование анонимное до подсчёта.",
+                "Присяжные образуют фракцию: "
+                f"{self.cmd('vote')} guilty или {self.cmd('vote')} innocent.\n"
+                f"Судья: {self.cmd('verdict')} guilty или {self.cmd('verdict')} innocent. "
+                "Голосование анонимное до подсчёта.\n"
+                f"{self.cmd('votes')} — кто уже проголосовал, без выбора.",
             )
 
     async def advance(self, game):
@@ -421,6 +560,29 @@ class Court:
                 "guilty" if guilty > len(votes) / 2 else "innocent"
             )
             await self.finish(game, outcome)
+
+    async def turn_state_text(self, game):
+        """One line of truth about the running hearing: who talks and how long."""
+        if game.status == "lobby":
+            return await self.lobby_card(game)
+        speaker = await self.by_code(game, game.state.get("speaker", ""))
+        title = (await self.role(speaker)).title if speaker else "суд"
+        left = max(0, int((game.deadline - utcnow()).total_seconds()))
+        lines = [
+            f"⚖️ {LABELS[game.phase]} • {game.title} (партия #{game.id})",
+            f"Слово: {title}"
+            + (" [бот]" if speaker and speaker.is_bot else "")
+            + f". Осталось {left // 60}:{left % 60:02d}.",
+        ]
+        if game.state.get("questioner"):
+            lines.append(f"Вопрос задаёт: {game.state['questioner']}.")
+        if game.phase in HANDOVER_PHASES or game.phase == "final":
+            lines.append(
+                "Закончили — напишите «я всё» или нажмите «Я всё, передать слово»."
+            )
+        if game.phase == "verdict":
+            lines.append(await self.vote_progress(game))
+        return "\n".join(lines)
 
     async def show_evidence(self, game, chat_id, role=None):
         visible = ["public"] + ([role.code] if role else [])
@@ -531,7 +693,8 @@ class Court:
         change(game, objection={"applicant": p.id, "valid": valid})
         await self.public(
             game,
-            f"{p.name}: Протестую! Судья: /objection accept или /objection reject.",
+            f"{p.name}: Протестую! Судья: {self.cmd('objection')} accept "
+            f"или {self.cmd('objection')} reject.",
         )
 
     async def resolve_objection(self, game, accept):
@@ -558,23 +721,128 @@ class Court:
             if judge and not judge.is_bot:
                 judge.violations += 1
                 await self.public(
-                    game, "Три неверных решения: основание для /recuse судьи."
+                    game,
+                    "Три неверных решения: основание для "
+                    f"{self.cmd('recuse')} судьи.",
                 )
+
+    def turn_state(self, game, code, delay=BOT_TURN_DELAY):
+        """Fresh turn counters for the role that receives the floor now."""
+        now = utcnow()
+        return {
+            "speaker": code,
+            "silence": 0,
+            "last_activity": now.isoformat(),
+            "bot_spoken": False,
+            "bot_due": (now + timedelta(seconds=delay)).isoformat(),
+        }
 
     async def pass_word(self, game):
         if game.phase == "debate":
-            code = "defense" if game.state["speaker"] == "prosecutor" else "prosecutor"
+            code = "defense" if game.state.get("speaker") == "prosecutor" else "prosecutor"
         else:
             code = SPEAKERS[game.phase]
+        change(game, **self.turn_state(game, code))
+        await self.public(game, f"Слово передано: {code}.")
+
+    async def give_floor(self, game, code, *, by=None, note=""):
+        """Hand the floor to another role inside the running phase, at once.
+
+        Unlike the deadline, this is instant: the receiver is mentioned in the
+        group so the turn does not sit unnoticed, its own timers restart, and a
+        human receiver also gets the «я всё» button right in that message.
+        """
+        target = await self.by_code(game, code)
+        if not target or not target.active:
+            raise ValueError("Некуда передавать слово: этой роли нет в игре")
+        title = (await self.role(target)).title
         change(
             game,
-            speaker=code,
-            silence=0,
-            last_activity=utcnow().isoformat(),
-            bot_spoken=False,
-            bot_due=(utcnow() + timedelta(seconds=8)).isoformat(),
+            **self.turn_state(game, code),
+            last_handover=utcnow().isoformat(),
         )
-        await self.public(game, f"Слово передано: {code}.")
+        left = max(0, int((game.deadline - utcnow()).total_seconds()))
+        message = self.mention(target, title)
+        text = f"🗣 {by.title if by else 'Судья'} передаёт слово: {message}. Осталось {left} сек."
+        markup = None
+        if not target.is_bot:
+            text += "\nВам дано слово. Закончили — напишите «я всё» или нажмите кнопку."
+            markup = keyboard(
+                [("🗣 Я всё, передать слово", f"pass:{game.id}")],
+                [("Протестую!", f"object:{game.id}")],
+            )
+        await self.public(
+            game,
+            text + (f" {note}" if note else ""),
+            memory=f"🗣 Слово передано: {title}.",
+            reply_markup=markup,
+            **({"parse_mode": "HTML"} if message != title else {}),
+        )
+        return target
+
+    async def hand_over(self, game, p, *, allow_bot=False):
+        """The current speaker finishes the turn and the floor moves on at once.
+
+        This is the single mechanic behind ``/pass``, the «Передать слово»
+        button and the AI's own "я закончил" signal. A witness goes back to the
+        side that questioned them, a party hands the floor to the opposing side
+        (and closes its own phase when it has none left), the accused closes the
+        final word after it has been spoken.
+        """
+        if game.status != "running":
+            raise ValueError("Игра не идёт")
+        if not p or not p.active:
+            raise ValueError("Нет действующего участника")
+        if p.is_bot and not allow_bot:
+            raise ValueError("Вашей ролью управляет бот — выступает он сам")
+        role = await self.role(p)
+        if not role:
+            raise ValueError("Сначала получите роль в начавшейся игре")
+        if game.phase in ("crime", "verdict"):
+            raise ValueError(
+                "В этой фазе ход ведёт суд: "
+                f"{self.cmd('votes')} покажет голоса, {self.cmd('players')} — состав"
+            )
+        if role.code == "judge":
+            if game.phase in ("final", "verdict"):
+                raise ValueError(
+                    "Судья не может пропустить финальное слово и вердикт"
+                )
+            await self.public(game, "Судья завершает фазу.")
+            return await self.advance(game)
+        if role.code != game.state.get("speaker"):
+            raise ValueError(
+                "Сейчас говорит другая роль — передать слово может только оратор"
+            )
+        now = utcnow()
+        previous = game.state.get("last_handover")
+        if previous and (now - datetime.fromisoformat(previous)).total_seconds() < HANDOVER_GAP:
+            raise ValueError("Слово только что передавали — подождите пару секунд")
+        if role.code.startswith("witness_"):
+            change(game, last_handover=now.isoformat())
+            return await self.give_floor(
+                game, game.state.get("questioner") or "judge", by=role
+            )
+        if role.code == "accused":
+            if not game.state.get("final_spoken"):
+                raise ValueError("Сначала скажите финальное слово: /final текст")
+            change(game, last_handover=now.isoformat())
+            await self.public(game, "Подсудимый завершил финальное слово.")
+            return await self.advance(game)
+        handovers = int(game.state.get("handovers", 0)) + 1
+        if handovers > MAX_HANDOVERS:
+            raise ValueError(
+                "Слово передаётся слишком часто — фаза идёт по дедлайну, говорите сейчас"
+            )
+        change(game, handovers=handovers, last_handover=now.isoformat())
+        where, value = floor_after(game.phase, role.code)
+        if where == "phase":
+            await self.public(
+                game,
+                f"✅ {role.title}: сторона закончила выступление, слово переходит дальше.",
+            )
+            return await self.set_phase(game, value)
+        await self.give_floor(game, value, by=role)
 
     async def vote_summary(self, game):
         jury = list(
@@ -595,13 +863,36 @@ class Court:
         unanimous = complete and len({votes[str(p.id)] for p in jury}) == 1
         return jury, votes, complete, unanimous
 
+    async def vote_progress(self, game):
+        """Who has already voted — the choices stay secret until the finish."""
+        jury, votes, complete, _ = await self.vote_summary(game)
+        voted = [p for p in jury if str(p.id) in votes]
+        waiting = [p for p in jury if str(p.id) not in votes]
+        lines = [f"🗳 Голоса присяжных: {len(voted)} из {len(jury)}."]
+        if voted:
+            lines.append("Уже проголосовали: " + ", ".join(p.name for p in voted) + ".")
+        if waiting:
+            lines.append("Ждём: " + ", ".join(p.name for p in waiting) + ".")
+        else:
+            lines.append("Все присяжные проголосовали.")
+        lines.append(
+            "Решение судьи: "
+            + ("вынесено." if game.state.get("judge_verdict") else "ещё нет.")
+        )
+        return "\n".join(lines)
+
     async def verdict(self, game, result):
         if game.phase != "verdict" or result not in ("guilty", "innocent"):
             raise ValueError("Вердикт доступен в финальной фазе: guilty / innocent")
         _jury, votes, complete, unanimous = await self.vote_summary(game)
         if not complete and (game.deadline - utcnow()).total_seconds() > 30:
             change(game, judge_verdict=result)
-            await self.public(game, "Решение судьи записано. Присяжные ещё голосуют.")
+            await self.public(
+                game,
+                "Решение судьи записано. Присяжные ещё голосуют: "
+                f"{len(votes)} из {len(_jury)}. "
+                f"{self.cmd('votes')} покажет, кто задержался.",
+            )
             return
         if (
             unanimous
@@ -637,14 +928,14 @@ class Court:
             f"Победила сторона {winner}: +100$, баланс {wallet.balance}$.\n"
             f"Присяжные: за виновность {list(votes.values()).count('guilty')}, "
             f"против {list(votes.values()).count('innocent')}. Единогласно: {'да' if unanimous else 'нет'}.\n"
-            "Игра завершена. Новая партия: /game",
+            f"Игра завершена. Новая партия: {self.cmd('game')}",
         )
 
-    async def bot_turn(self, game, p):
-        role = await self.role(p)
+    async def bot_speech(self, game, role):
+        """(text, done) from the AI; the fallback line never ends a turn early."""
         try:
             async with asyncio.timeout(15):
-                text = await speak(self.ai, role.title, await self.context(game, role))
+                return await speak(self.ai, role.title, await self.context(game, role))
         except (AIUnavailable, TimeoutError) as exc:
             log.warning(
                 "Bot speech fallback game=%s phase=%s role=%s reason=%s",
@@ -653,7 +944,14 @@ class Court:
                 getattr(role, "code", None),
                 cause(exc),
             )
-            text = "Прошу оценивать только представленные факты. Новых сведений у меня нет."
+            return (
+                "Прошу оценивать только представленные факты. Новых сведений у меня нет.",
+                False,
+            )
+
+    async def bot_turn(self, game, p):
+        role = await self.role(p)
+        text, done = await self.bot_speech(game, role)
         if game.phase == "final":
             text = text[:200]
             change(game, final_spoken=True)
@@ -663,20 +961,44 @@ class Court:
         if role.code.startswith("witness_"):
             # Return to the questioning side after a bot witness answers.
             code = game.state.get("questioner") or SPEAKERS[game.phase]
-            change(
-                game,
-                speaker=code,
-                last_activity=utcnow().isoformat(),
-                silence=0,
-                bot_spoken=False,
-                bot_due=(utcnow() + timedelta(seconds=20)).isoformat(),
-            )
-        elif role.code in ("prosecutor", "defense") and game.phase in (
+            change(game, **self.turn_state(game, code, delay=20))
+            return
+        if role.code in ("prosecutor", "defense") and game.phase in (
             "accusation",
             "defense",
             "debate",
         ):
             await self.bot_action(game, p, role)
+        if done:
+            await self.bot_finished(game, p, role)
+
+    async def bot_finished(self, game, p, role):
+        """The AI reported "я закончил": hand the word over without the deadline.
+
+        The court announces the handover itself, so players see that the bot's
+        turn is over. The engine keeps the judge's own pace: only the speaking
+        parties do this, the judge moves the hearing by the clock or by /next.
+        """
+        if role.code == "judge" or game.state.get("speaker") != role.code:
+            return
+        if game.state.get("objection"):
+            return  # the judge still has to rule on the protest first
+        try:
+            await self.hand_over(game, p, allow_bot=True)
+            log.info(
+                "Bot finished early game=%s phase=%s role=%s",
+                game.id,
+                game.phase,
+                role.code,
+            )
+        except ValueError:
+            # Not a failure: the phase simply has nothing to hand over to.
+            log.info(
+                "Bot handover skipped game=%s phase=%s role=%s",
+                game.id,
+                game.phase,
+                role.code,
+            )
 
     async def bot_action(self, game, p, role):
         # At most one optional action per side and phase, to avoid AI action loops.
@@ -794,14 +1116,17 @@ class Court:
             elif (now - game.last_notice).total_seconds() >= 30:
                 seconds = max(0, int((game.deadline - now).total_seconds()))
                 game.last_notice = now
+                people = await self.players(game)
+                names = ", ".join(p.name for p in people) or "пока никого"
                 await self.send(
                     game.chat_id,
-                    f"Осталось {seconds // 60} мин. {seconds % 60} сек., поспешите в зал суда!👨‍⚖️",
+                    f"Осталось {seconds // 60} мин. {seconds % 60} сек., "
+                    f"поспешите в зал суда!👨‍⚖️ В зале ({len(people)}): {names}.",
                 )
+                await self.refresh_lobby(game)
             return
         if game.status != "running":
             return
-        from datetime import datetime
 
         if game.phase == "verdict":
             jury, votes, complete, _ = await self.vote_summary(game)
@@ -810,8 +1135,18 @@ class Court:
                     votes = {**votes, str(p.id): await self.ai_decision(game, p)}
                     change(game, votes=votes)
                     return  # Bound work per tick; keep receiving updates between AI turns.
+            if complete and not game.state.get("judge_verdict") and not game.state.get(
+                "jury_notice"
+            ):
+                # Everyone is waiting for the judge: say it once, not every tick.
+                change(game, jury_notice=True)
+                await self.public(
+                    game,
+                    "Все присяжные проголосовали. Слово судье: "
+                    f"{self.cmd('verdict')} guilty или {self.cmd('verdict')} innocent.",
+                )
             judge = await self.by_code(game, "judge")
-            if judge.is_bot and not game.state.get("judge_verdict"):
+            if judge and judge.is_bot and not game.state.get("judge_verdict"):
                 await self.verdict(game, await self.ai_decision(game, judge))
                 return
             if game.state.get("judge_verdict") and not game.state.get("appealed"):
@@ -856,7 +1191,7 @@ class Court:
                 log.warning(
                     "Expertise price kept game=%s reason=%s", game.id, cause(exc)
                 )
-        p = await self.by_code(game, game.state["speaker"])
+        p = await self.by_code(game, game.state.get("speaker", ""))
         if not p:
             return
         if p.is_bot:
@@ -873,8 +1208,12 @@ class Court:
         stage = game.state.get("silence", 0)
         if silence >= 30 and stage == 0:
             change(game, silence=1)
+            voice = self.mention(p, p.name)
             await self.public(
-                game, f"{p.name}, 30 секунд молчания. Ещё 30 секунд — слово дальше."
+                game,
+                f"{voice}, 30 секунд молчания. Ещё 30 секунд — слово дальше. "
+                "Если вы всё сказали, напишите «я всё» или нажмите кнопку.",
+                **({"parse_mode": "HTML"} if voice != p.name else {}),
             )
         elif silence >= 60 and stage == 1:
             p.violations += 1

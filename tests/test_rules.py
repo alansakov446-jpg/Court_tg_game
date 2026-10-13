@@ -2,10 +2,17 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from game.rules import (
+    HANDOVER_PHASES,
+    PHASES,
+    ROLE_PREVIEW,
+    SEATS,
+    SPEAKERS,
     explain_failure,
     extend_deadline,
     fallback_case,
+    finish_phrase,
     fingerprint,
+    floor_after,
     role_specs,
     validate_case,
 )
@@ -92,3 +99,63 @@ class RulesTests(unittest.TestCase):
             self.assertEqual(explain_failure(exc), expected)
         timeout = TimeoutError()
         self.assertEqual(explain_failure(timeout), "ИИ не ответил вовремя")
+
+    def test_finish_phrases_end_the_turn_and_speeches_do_not(self):
+        for text in (
+            "я всё",
+            "Я всё!",
+            "всё",
+            "на этом всё",
+            "на этом у меня все",
+            "ну всё",
+            "И всё.",
+            "я закончил",
+            "Я закончила",
+            "закончил",
+            "я всё сказал",
+            "всё сказал",
+            "сказал всё",
+            "у меня всё",
+            "у меня нет вопросов",
+            "мне нечего добавить",
+            "больше нечего сказать",
+            "передаю слово",
+            "передать слово",
+            "/pass",
+            "/done",
+            "/next",
+        ):
+            self.assertTrue(finish_phrase(text), text)
+        for text in (
+            "Всё свидетели врут из-за денег",
+            "Все свидетели врут",
+            "я не закончил",
+            "я всё сказал про нож, но есть ещё деталь",
+            "передаю слово защиты в суде",
+            "закончилась экспертиза",
+            "У меня все документы на руках",
+            "всё хорошо, но я продолжу мысль",
+            "",
+        ):
+            self.assertFalse(finish_phrase(text), text)
+
+    def test_floor_after_keeps_the_word_inside_the_phase(self):
+        # A party that has not finished goes to the other side of the debate.
+        self.assertEqual(floor_after("debate", "prosecutor"), ("role", "defense"))
+        self.assertEqual(floor_after("debate", "defense"), ("role", "prosecutor"))
+        # A witness goes back to the judge unless the caller names the questioner.
+        self.assertEqual(floor_after("accusation", "witness_1"), ("role", "prosecutor"))
+        # Finished its own phase: the hearing moves on without a deadline.
+        self.assertEqual(floor_after("accusation", "prosecutor"), ("phase", "defense"))
+        self.assertEqual(floor_after("defense", "defense"), ("phase", "debate"))
+        self.assertEqual(floor_after("final", "accused"), ("phase", "verdict"))
+        # The judge never advances itself, and the phases without a speaker stay put.
+        self.assertEqual(floor_after("debate", "judge"), ("role", "judge"))
+        self.assertEqual(floor_after("crime", "judge"), ("role", "judge"))
+        self.assertEqual(floor_after("verdict", "judge"), ("role", "judge"))
+
+    def test_every_phase_has_a_speaker_and_a_handover_rule(self):
+        self.assertEqual(set(SPEAKERS), set(PHASES))
+        self.assertTrue(set(HANDOVER_PHASES) <= set(PHASES))
+        self.assertEqual(SEATS, len(role_specs(SEATS)))
+        self.assertIn("судья", ROLE_PREVIEW)

@@ -1,15 +1,111 @@
+import logging
+
 from aiogram import Router
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    CallbackQuery,
+    Message,
+)
 from sqlalchemy import select
 
 from db.models import Economy, Game, Player, utcnow
-from game.rules import extend_deadline
+from game.rules import (
+    commands_need_mention,
+    extend_deadline,
+    finish_phrase,
+    route_command,
+)
 from game.service import Court, change
 
 router = Router()
+
+log = logging.getLogger("court.handlers")
+
+# The command menu Telegram shows when a player types "/". Telegram accepts only
+# lowercase latin names up to 32 characters, so every name here is a real
+# command of this bot. Group and private scopes are registered separately: the
+# hall lives in the group, the personal role, juror mail and the game picker
+# live in the bot's private chat.
+GROUP_COMMANDS = [
+    ("game", "открыть зал суда: /game [0..9 ботов]"),
+    ("startnow", "начать игру сразу, без ожидания"),
+    ("lobby", "кто уже в зале суда"),
+    ("players", "участники, номера и кому дано слово"),
+    ("state", "кто говорит и сколько осталось"),
+    ("extend", "продлить набор: /extend 30"),
+    ("stop", "закрыть зал (создатель или админ)"),
+    ("pass", "я всё — передать слово дальше"),
+    ("done", "то же, что /pass"),
+    ("ask", "вопрос ИИ-ведущему: /ask вопрос"),
+    ("evidence", "улики: публичные в группе, свои в ЛС"),
+    ("publish", "приобщить свою улику: /publish ID"),
+    ("expert", "экспертиза улики: /expert ID"),
+    ("balance", "бюджеты сторон и цена экспертизы"),
+    ("call", "вызвать свидетеля: /call ID"),
+    ("question", "допросить свидетеля: /question ID вопрос"),
+    ("object", "протест против последней реплики"),
+    ("objection", "решение судьи: /objection accept|reject"),
+    ("word", "судья даёт слово: /word ID"),
+    ("next", "судья завершает фазу: /next"),
+    ("recuse", "отвод участника: /recuse ID"),
+    ("return", "вернуться после первого отстранения"),
+    ("leave", "выйти из зала или отдать роль боту"),
+    ("final", "финальное слово подсудимого: /final текст"),
+    ("vote", "голос присяжного: /vote guilty|innocent"),
+    ("votes", "сколько присяжных уже проголосовало"),
+    ("verdict", "решение судьи: /verdict guilty|innocent"),
+    ("help", "все команды и правила"),
+]
+PRIVATE_COMMANDS = [
+    ("games", "игры, в которых я участвую"),
+    ("use", "выбрать игру: /use ID"),
+    ("role", "моя роль, знания и улики"),
+    ("lobby", "кто уже в зале суда"),
+    ("state", "кто говорит и сколько осталось"),
+    ("say", "присяжный — судье: /say anon|public текст"),
+    ("sayto", "присяжный присяжному: /sayto ID текст"),
+    ("vote", "тайный голос присяжного: /vote guilty|innocent"),
+    ("votes", "сколько присяжных уже проголосовало"),
+    ("help", "все команды и правила"),
+]
+COMMAND_SCOPES = (
+    (BotCommandScopeAllGroupChats(), GROUP_COMMANDS),
+    (BotCommandScopeAllPrivateChats(), PRIVATE_COMMANDS),
+)
+
+
+async def install_commands(bot, scopes=COMMAND_SCOPES):
+    """Publish the "/" menu for groups and private chats.
+
+    Telegram replaces the whole list at once, so a rejected description must not
+    stop the bot: an empty menu is a cosmetic loss, a dead poller is not.
+    """
+    published = True
+    for scope, commands in scopes:
+        try:
+            await bot.set_my_commands(
+                [BotCommand(command=c, description=d) for c, d in commands],
+                scope=scope,
+            )
+            log.info(
+                "Command menu published scope=%s commands=%d",
+                type(scope).__name__,
+                len(commands),
+            )
+        except Exception as exc:  # noqa: BLE001 — the menu is decoration, polling is not
+            published = False
+            log.warning(
+                "Command menu not published scope=%s reason=%s",
+                type(scope).__name__,
+                type(exc).__name__,
+            )
+    return published
 HELP = """🏛 Суд — вымышленная судебная игра
 В группе:
 /game [0..9] — открыть зал; вступление кнопкой в ЛС
+/lobby — кто уже в зале (очередь вступления)
 /extend 30 — продлить (предел 5 минут от создания)
 /startnow, /stop — создатель зала или администратор
 /players, /evidence, /balance — участники и материалы
@@ -18,6 +114,7 @@ HELP = """🏛 Суд — вымышленная судебная игра
 /ask вопрос — спросить ИИ-ведущего; ответ сохранится в памяти
 /call ID — вызвать свидетеля (адвокат/прокурор/судья)
 /question ID вопрос — допросить свидетеля (старый /ask ID вопрос тоже работает)
+/pass или /done — сказать всё: слово сразу уходит следующей стороне
 /object — протест; /objection accept|reject — решение судьи
 /word ID — дать слово; /next — следующая фаза (судья)
 /recuse ID — отвод; повтор команды другими игроками — поддержка
@@ -25,6 +122,7 @@ HELP = """🏛 Суд — вымышленная судебная игра
 /leave — навсегда передать роль боту после старта
 /final текст — финальное слово подсудимого, до 200 символов
 /vote guilty|innocent — голос присяжного (можно в ЛС)
+/votes — сколько присяжных проголосовало (без выбора)
 /verdict guilty|innocent — решение судьи
 В ЛС:
 /games, /use ID — выбрать игру при участии в нескольких
@@ -89,6 +187,10 @@ async def callback(query: CallbackQuery, court: Court):
             )
         elif action == "object" and game.status == "running":
             await court.objection(game, p)
+        elif action == "pass" and game.status == "running":
+            # The player who holds the floor ends the turn instead of waiting
+            # out the deadline; everyone else gets a local explanation.
+            await court.hand_over(game, p)
     except ValueError as exc:
         await court.send(query.from_user.id, str(exc))
 
@@ -110,16 +212,26 @@ async def message_handler(message: Message, court: Court):
         await court.send(message.chat.id, text or "Проверьте аргументы: /help")
 
 
+def help_text(court, chat_type):
+    """Help for the chat it is read in: in a group commands need the bot's name."""
+    if chat_type != "private" and commands_need_mention():
+        return (
+            f"В группе команды адресуются боту: /game@{court.username}. "
+            "Меню «/» подставляет имя само, а в ЛС имя не нужно.\n\n" + HELP
+        )
+    return HELP
+
+
 async def handle(m, c):
-    parts = m.text.split(maxsplit=1)
-    cmd = parts[0].split("@")[0].lower()
-    if "@" in parts[0] and parts[0].split("@", 1)[1].lower() != c.username.lower():
+    # In a group the bot reacts only to its own commands: a bare "/pass" or
+    # somebody else's "/gg" gets no reply at all (see route_command).
+    kind, cmd, arg = route_command(m.text, m.chat.type, c.username)
+    if kind == "ignore":
         return
-    arg = parts[1].strip() if len(parts) > 1 else ""
     if cmd in ("/help", "/start"):
         if cmd == "/start" and arg.startswith("join_"):
             return await c.join(m, arg)
-        return await c.send(m.chat.id, HELP)
+        return await c.send(m.chat.id, help_text(c, m.chat.type))
     if cmd == "/game":
         return await c.new_game(m, int(arg) if arg else 0)
     if cmd in ("/games", "/use"):
@@ -156,7 +268,10 @@ async def handle(m, c):
     if not game:
         if cmd.startswith("/"):
             await c.send(
-                m.chat.id, "Нет открытой игры. /game в группе или вступите по ссылке."
+                m.chat.id,
+                "Нет открытой игры. "
+                f"{c.cmd('game', group=m.chat.type != 'private')} в группе "
+                "или вступите по ссылке.",
             )
         return
     p = await c.player(game, m.from_user.id)
@@ -167,7 +282,8 @@ async def handle(m, c):
             game.status = "stopped"
             return await c.send(
                 game.chat_id,
-                "Зал суда👨‍⚖️ закрыли. Если хотите поиграть, просто напишите /game",
+                "Зал суда👨‍⚖️ закрыли. Если хотите поиграть, просто напишите "
+                f"{c.cmd('game')}",
             )
         return await c.start(game)
     if cmd == "/extend":
@@ -180,8 +296,15 @@ async def handle(m, c):
         )
     if cmd == "/leave":
         return await c.leave(game, p)
+    if cmd in ("/lobby", "/players") and game.status == "lobby":
+        # Lobby: the roster is the answer; in the group the card is also refreshed.
+        if m.chat.type != "private":
+            await c.refresh_lobby(game)
+        return await c.send(m.chat.id, await c.lobby_card(game))
     if game.status != "running":
         return
+    if cmd == "/lobby":
+        return await c.send(m.chat.id, await c.lobby_card(game, closing=True))
     if cmd == "/players":
         lines = []
         for item in await c.players(game):
@@ -189,8 +312,12 @@ async def handle(m, c):
             lines.append(
                 f"{item.id}: {r.title} — {item.name}"
                 + (" [бот]" if item.is_bot else "")
+                + (" • сейчас говорит" if r.code == game.state.get("speaker") else "")
             )
         return await c.send(m.chat.id, "\n".join(lines))
+    if cmd == "/state":
+        # Anyone in the chat may ask who is speaking; no role is required.
+        return await c.send(m.chat.id, await c.turn_state_text(game))
     if cmd == "/balance":
         wallets = (
             await c.db.scalars(select(Economy).where(Economy.game_id == game.id))
@@ -255,7 +382,10 @@ async def handle(m, c):
     if cmd in ("/say", "/sayto"):
         if m.chat.type != "private" or not r.code.startswith("juror_"):
             raise ValueError("Переписка присяжных работает в ЛС бота")
-        dest, text = arg.split(maxsplit=1)
+        # A missing text used to crash on unpacking; now it is a clear hint.
+        dest, text = (arg.split(maxsplit=1) + [""])[:2]
+        if not dest or not text:
+            raise ValueError("/say anon|public текст или /sayto ID текст")
         if len(text) > 1500:
             raise ValueError("Сообщение до 1500 символов")
         if cmd == "/say":
@@ -287,10 +417,18 @@ async def handle(m, c):
             or arg not in ("guilty", "innocent")
         ):
             raise ValueError(
-                "Присяжный голосует в фазе вердикта: /vote guilty|innocent"
+                "Присяжный голосует в фазе вердикта: "
+                f"{c.cmd('vote', group=m.chat.type != 'private')} guilty|innocent"
             )
         change(game, votes={**game.state.get("votes", {}), str(p.id): arg})
         return await c.send(m.chat.id, "Голос записан.")
+    if cmd == "/votes":
+        if game.phase != "verdict":
+            raise ValueError("Голосование присяжных идёт в фазе вердикта")
+        return await c.send(m.chat.id, await c.vote_progress(game))
+    if cmd in ("/pass", "/done"):
+        # "Я всё сказал": the floor moves on at once, no waiting for the deadline.
+        return await c.hand_over(game, p)
     if cmd == "/verdict":
         if r.code != "judge":
             raise ValueError("Вердикт выносит судья")
@@ -339,9 +477,10 @@ async def handle(m, c):
         ):
             raise ValueError("Свидетеля вызывают судья, прокурор или адвокат")
         if cmd == "/question":
-            if game.state["speaker"] != tr.code or len(args) < 2:
+            if game.state.get("speaker") != tr.code or len(args) < 2:
                 raise ValueError(
-                    "Сначала вызовите свидетеля: /call ID, затем /question ID вопрос"
+                    "Сначала вызовите свидетеля: "
+                    f"{c.cmd('call')} ID, затем {c.cmd('question')} ID вопрос"
                 )
             await c.record(
                 game, f"{r.title} спрашивает свидетеля: {args[1][:1500]}", ["public"], p
@@ -397,7 +536,8 @@ async def handle(m, c):
         else:
             await c.public(
                 game,
-                f"Отвод #{target.id}: поддержка {len(supporters)}/{threshold}. /recuse {target.id}",
+                f"Отвод #{target.id}: поддержка {len(supporters)}/{threshold}. "
+                f"{c.cmd('recuse')} {target.id}",
             )
         return
     if cmd == "/final":
@@ -415,19 +555,35 @@ async def handle(m, c):
         await c.record(game, f"Финальное слово: {arg}", ["public"], p)
         return await c.public(game, f"Финальное слово подсудимого: {arg}")
     if cmd.startswith("/"):
-        return await c.send(m.chat.id, "Неизвестная команда. /help")
-    if game.phase == "final" and r.code == "accused":
+        # Command names are shown the way the bot will hear them in this chat.
         return await c.send(
-            m.chat.id, "Для финального слова: /final текст (до 200 символов)."
+            m.chat.id,
+            f"Неизвестная команда. {c.cmd('help', group=m.chat.type != 'private')}",
         )
-    if r.code != game.state["speaker"] and r.code != "judge":
+    if r.code == "accused" and game.phase == "final":
+        return await c.send(
+            m.chat.id,
+            "Вы уже сказали финальное слово. Закончили — напишите «я всё» "
+            "или нажмите кнопку, и суд перейдёт к вердикту."
+            if game.state.get("final_spoken")
+            else (
+                f"Для финального слова: {c.cmd('final')} текст "
+                "(до 200 символов). Закончили — напишите «я всё»."
+            ),
+        )
+    # «Я всё», «на этом у меня всё»: the speaker ends the turn, the court hands
+    # the word over at once. Anyone else falls through to the usual penalty path.
+    if r.code in (game.state.get("speaker"), "judge") and finish_phrase(m.text):
+        try:
+            return await c.hand_over(game, p)
+        except ValueError as exc:
+            return await c.send(m.chat.id, str(exc))
+    if r.code != game.state.get("speaker") and r.code != "judge":
         p.violations += 1
         await c.fine(game, p)
         if p.violations >= 2 and r.code != "accused":
             await c.remove(game, p)
         return
-    if game.phase == "final":
-        return  # Only /final is accepted during the protected final minute.
     await c.record(game, f"{r.title}: {m.text[:3000]}", ["public"], p)
-    if r.code == game.state["speaker"]:
+    if r.code == game.state.get("speaker"):
         change(game, last_activity=utcnow().isoformat(), silence=0)
