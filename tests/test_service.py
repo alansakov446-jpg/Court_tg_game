@@ -362,12 +362,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "финальное слово"):
             await self.court.hand_over(self.game, self.p)
 
-    async def test_crime_and_verdict_phases_have_no_handover(self):
-        for phase in ("crime", "verdict"):
-            self.game.phase = phase
-            self.speaking("defense")
-            with self.assertRaisesRegex(ValueError, "ход ведёт суд"):
-                await self.court.hand_over(self.game, self.p)
+    async def test_crime_and_verdict_phases_have_no_personal_turn(self):
+        # Each phase gets its own hint instead of a generic refusal.
+        self.game.phase = "crime"
+        self.speaking("defense")
+        with self.assertRaisesRegex(ValueError, "/next@court_bot завершит"):
+            await self.court.hand_over(self.game, self.p)
+        self.game.phase = "verdict"
+        self.speaking("defense")
+        with self.assertRaisesRegex(ValueError, "/votes@court_bot покажет"):
+            await self.court.hand_over(self.game, self.p)
 
     async def test_bot_signal_hands_the_floor_over_at_once(self):
         other = Player(id=9, game_id=1, user_id=77, name="Прокурор", active=True)
@@ -496,6 +500,10 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Уже проголосовали: Аня", progress)
         self.assertIn("Ждём: Боб", progress)
         self.assertNotIn("guilty", progress)
+
+    async def test_vote_progress_without_a_jury_says_so(self):
+        self.court.vote_summary = AsyncMock(return_value=([], {}, False, False))
+        self.assertIn("Присяжных в этой игре нет", await self.court.vote_progress(self.game))
 
     async def test_judge_verdict_waits_for_the_jury_with_progress(self):
         self.game.phase = "verdict"

@@ -829,10 +829,13 @@ class Court:
         if not role:
             raise ValueError("Сначала получите роль в начавшейся игре")
         if game.phase in ("crime", "verdict"):
-            raise ValueError(
-                "В этой фазе ход ведёт суд: "
-                f"{self.cmd('votes')} покажет голоса, {self.cmd('players')} — состав"
+            # Both phases run on the court's clock: nobody holds a personal turn.
+            hint = (
+                f"{self.cmd('next')} завершит эту фазу досрочно"
+                if game.phase == "crime"
+                else f"голоса собираются кнопками, {self.cmd('votes')} покажет, кого ждут"
             )
+            raise ValueError(f"В этой фазе личного слова нет: {hint}")
         if role.code == "judge":
             if game.phase in ("final", "verdict"):
                 raise ValueError(
@@ -914,6 +917,8 @@ class Court:
     async def vote_progress(self, game):
         """Who has already voted — the choices stay secret until the finish."""
         jury, votes, complete, _ = await self.vote_summary(game)
+        if not jury:
+            return "🗳 Присяжных в этой игре нет: решение за судьёй."
         voted = [p for p in jury if str(p.id) in votes]
         waiting = [p for p in jury if str(p.id) not in votes]
         lines = [f"🗳 Голоса присяжных: {len(voted)} из {len(jury)}."]
