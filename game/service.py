@@ -172,8 +172,11 @@ class Court:
         if closing:
             return
         sent = await self.send(game.chat_id, text, reply_markup=markup)
-        if sent is not None and getattr(sent, "message_id", None):
-            change(game, lobby_message=sent.message_id)
+        message_id = getattr(sent, "message_id", None)
+        # Only a real id may enter state: the column is JSONB and every later
+        # edit depends on this value.
+        if isinstance(message_id, int):
+            change(game, lobby_message=message_id)
 
     async def players(self, game):
         return list(

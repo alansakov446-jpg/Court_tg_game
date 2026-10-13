@@ -559,5 +559,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("я всё", text)
 
 
+    async def test_only_a_real_message_id_is_kept_for_the_lobby_card(self):
+        self.game.status = "lobby"
+        self.game.state = {}
+        self.court.players = AsyncMock(return_value=[])
+        self.bot.send_message = AsyncMock(return_value=MagicMock())
+        await self.court.refresh_lobby(self.game)
+        # JSONB state must never receive a mock or another non-serializable id.
+        self.assertNotIn("lobby_message", self.game.state)
+
+
 if __name__ == "__main__":
     unittest.main()
+

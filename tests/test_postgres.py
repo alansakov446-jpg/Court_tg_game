@@ -24,7 +24,10 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
                     "TRUNCATE economy, statements, evidence, players, roles, games, bot_state RESTART IDENTITY CASCADE"
                 )
             )
-        self.bot = SimpleNamespace(send_message=AsyncMock())
+        self.bot = SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)),
+            edit_message_text=AsyncMock(),
+        )
         self.ai = SimpleNamespace(generate=AsyncMock())
         self.case = {
             "crime": "Исчезновение картины во время аукциона",
@@ -206,21 +209,31 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.sessions() as session, session.begin():
             c = Court(session, self.bot, self.ai, "test_bot")
+            # A group command must name the bot; a bare one gets no reply at all.
             await handle(msg("/game"), c)
+            self.assertIsNone(await c.active_game(-100001))
+            self.bot.send_message.reset_mock()
+            await handle(msg("/game@test_bot"), c)
             game = await c.active_game(-100001)
             self.assertIsNotNone(game)
+            self.assertEqual(game.status, "lobby")
+            # The lobby card is posted once, and its id stays a real number:
+            # games.state goes into JSONB, so a placeholder would break the row.
+            self.assertIsInstance(game.state["lobby_message"], int)
             join = msg(f"/start join_{game.chat_id}_{game.id}", private=True)
             await handle(join, c)
             await session.flush()
+            # A join edits that same card instead of posting a new one.
+            self.bot.edit_message_text.assert_awaited()
             p = await c.player(game, 123)
             self.assertTrue(p.active)
             await handle(msg("/leave", private=True), c)
             self.assertFalse(p.active)
             await handle(join, c)
             self.assertTrue(p.active)
-            await handle(msg("/extend 999"), c)
+            await handle(msg("/extend@test_bot 999"), c)
             self.assertEqual(game.deadline, game.created_at + timedelta(minutes=5))
-            await handle(msg("/startnow"), c)
+            await handle(msg("/startnow@test_bot"), c)
             await handle(msg("/leave", private=True), c)
             self.assertTrue(p.permanent)
             await handle(join, c)
@@ -234,7 +247,10 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
             game = await self.create_game(session)
             c = Court(session, self.bot, self.ai, "test_bot")
             await c.start(game)
-            self.ai.generate.return_value = "Только факты из материалов дела."
+            self.ai.generate.return_value = {
+                "speech": "Только факты из материалов дела.",
+                "done": False,
+            }
             await c.bot_turn(game, await c.by_code(game, "judge"))
             for phase in ("accusation", "defense", "debate", "final", "verdict"):
                 game.deadline = utcnow() - timedelta(seconds=1)
