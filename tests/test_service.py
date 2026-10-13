@@ -569,6 +569,117 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("lobby_message", self.game.state)
 
 
+
+    # --- Witness calls, voting buttons -------------------------------------
+
+    async def test_giving_the_floor_to_a_witness_pings_and_offers_the_button(self):
+        witness = Player(
+            id=7, game_id=1, user_id=55, name="Свидетель", active=True, is_bot=False
+        )
+        self.game.phase = "accusation"
+        change(self.game, **self.court.turn_state(self.game, "prosecutor"))
+        self.court.by_code = AsyncMock(return_value=witness)
+        self.court.role = AsyncMock(
+            side_effect=lambda player: (
+                Role(code="witness_1", title="Свидетель 1")
+                if player is witness
+                else Role(code="prosecutor", title="Прокурор", side="prosecution")
+            )
+        )
+        await self.court.give_floor(
+            self.game,
+            "witness_1",
+            by=self.role,
+            note="Вопрос: Что вы видели?",
+            delay=3,
+            questioner="prosecutor",
+            handover=False,
+        )
+        self.assertEqual(self.game.state["speaker"], "witness_1")
+        self.assertEqual(self.game.state["questioner"], "prosecutor")
+        # Calling a witness is not a mutual handover, so it never trips the rate limit.
+        self.assertNotIn("last_handover", self.game.state)
+        text = self.bot.send_message.await_args.args[1]
+        kwargs = self.bot.send_message.await_args.kwargs
+        self.assertIn("Что вы видели?", text)
+        self.assertIn('href="tg://user?id=55"', text)
+        self.assertIn("pass:1", str(kwargs["reply_markup"]))
+
+    async def test_a_bot_witness_returns_the_floor_to_the_questioner(self):
+        questioner = Player(
+            id=5, game_id=1, user_id=44, name="Прокурор", active=True, is_bot=False
+        )
+        self.p.is_bot = True
+        self.game.phase = "accusation"
+        self.speaking("witness_1", receiver=questioner)
+        change(self.game, questioner="prosecutor")
+
+        async def roles(player):
+            return Role(
+                code="prosecutor" if player is questioner else "witness_1",
+                title="Прокурор" if player is questioner else "Свидетель 1",
+            )
+
+        self.court.role = AsyncMock(side_effect=roles)
+        self.court.context = AsyncMock(return_value={})
+        with patch("game.service.speak", AsyncMock(return_value=("Видел нож.", True))):
+            await self.court.bot_turn(self.game, self.p)
+        self.assertEqual(self.game.state["speaker"], "prosecutor")
+        text = self.bot.send_message.await_args.args[1]
+        self.assertIn("передаёт слово", text)
+        self.assertIn("pass:1", str(self.bot.send_message.await_args.kwargs["reply_markup"]))
+
+    async def test_only_the_judge_can_issue_the_verdict(self):
+        self.game.phase = "verdict"
+        self.role.code, self.role.title = "juror_1", "Присяжный 1"
+        with self.assertRaisesRegex(ValueError, "Вердикт выносит судья"):
+            await self.court.verdict(self.game, "guilty", by=self.p)
+        self.assertNotIn("judge_verdict", self.game.state)
+        # The engine itself keeps calling verdict() without an actor.
+        self.role.code, self.role.title = "judge", "Судья"
+        self.court.vote_summary = AsyncMock(
+            return_value=([], {"2": "guilty"}, True, False)
+        )
+        self.court.finish = AsyncMock()
+        await self.court.verdict(self.game, "guilty", by=self.p)
+        self.court.finish.assert_awaited_once_with(self.game, "guilty")
+
+    async def test_cast_vote_records_the_choice_and_keeps_it_quiet(self):
+        self.game.phase = "verdict"
+        self.role.code, self.role.title = "juror_1", "Присяжный 1"
+        first = await self.court.cast_vote(self.game, self.p, "guilty")
+        self.assertIn("Голос записан", first)
+        self.assertEqual(self.game.state["votes"], {"2": "guilty"})
+        # A juror may change their mind until the verdict is out.
+        second = await self.court.cast_vote(self.game, self.p, "innocent")
+        self.assertIn("изменён", second)
+        self.assertEqual(self.game.state["votes"], {"2": "innocent"})
+
+    async def test_cast_vote_refuses_the_wrong_phase_role_and_word(self):
+        self.game.phase = "debate"
+        self.role.code = "juror_1"
+        with self.assertRaisesRegex(ValueError, "фазе вердикта"):
+            await self.court.cast_vote(self.game, self.p, "guilty")
+        self.game.phase = "verdict"
+        self.role.code = "prosecutor"
+        with self.assertRaisesRegex(ValueError, "присяжный"):
+            await self.court.cast_vote(self.game, self.p, "guilty")
+        self.role.code = "juror_1"
+        with self.assertRaisesRegex(ValueError, "guilty или innocent"):
+            await self.court.cast_vote(self.game, self.p, "maybe")
+        self.assertNotIn("votes", self.game.state)
+
+    async def test_the_phase_card_offers_vote_and_verdict_buttons(self):
+        self.court.by_code = AsyncMock(return_value=None)
+        self.court.show_evidence = AsyncMock()
+        await self.court.set_phase(self.game, "verdict")
+        # The phase card is the first message of the phase and carries the buttons.
+        markup = self.bot.send_message.await_args_list[0].kwargs["reply_markup"]
+        data = [button.callback_data for row in markup.inline_keyboard for button in row]
+        self.assertIn("vote:1:guilty", data)
+        self.assertIn("vote:1:innocent", data)
+        self.assertIn("verdict:1:guilty", data)
+        self.assertIn("verdict:1:innocent", data)
+
 if __name__ == "__main__":
     unittest.main()
-
