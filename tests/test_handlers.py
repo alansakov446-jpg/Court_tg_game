@@ -6,6 +6,7 @@ from db.models import Game, Player, Role, utcnow
 from game.handlers import (
     GROUP_COMMANDS,
     PRIVATE_COMMANDS,
+    callback,
     handle,
     install_commands,
 )
@@ -49,6 +50,8 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             send=AsyncMock(),
             public=AsyncMock(),
             record=AsyncMock(),
+            give_floor=AsyncMock(),
+            cast_vote=AsyncMock(return_value="Голос записан: виновен."),
             hand_over=AsyncMock(),
             refresh_lobby=AsyncMock(),
             lobby_card=AsyncMock(return_value="карточка зала"),
@@ -107,11 +110,14 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.court.ask_host.assert_not_awaited()
         self.court.record.assert_awaited_once()
         self.assertIn("Что вы видели?", self.court.record.await_args.args[1])
-        self.court.public.assert_awaited_once()
+        # The witness gets the floor at once, with the ping and the button.
+        kwargs = self.court.give_floor.await_args.kwargs
+        self.assertEqual(self.court.give_floor.await_args.args[1], "witness_1")
+        self.assertEqual(kwargs["delay"], 3)
+        self.assertEqual(kwargs["questioner"], "prosecutor")
+        self.assertFalse(kwargs["handover"])
+        self.assertIn("Что вы видели?", kwargs["note"])
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class HandoverCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -439,3 +445,172 @@ class StateCommandTests(unittest.IsolatedAsyncioTestCase):
         await handle(message, court)
         court.turn_state_text.assert_awaited_once_with(game)
         self.assertIn("Слово: Адвокат", court.send.await_args.args[1])
+
+
+class CallbackTests(unittest.IsolatedAsyncioTestCase):
+    """Every button answers with a private toast, never with group noise."""
+
+    def setUp(self):
+        self.game = Game(
+            id=1,
+            chat_id=-100,
+            title="Тестовый суд",
+            creator_id=10,
+            status="running",
+            phase="verdict",
+            deadline=utcnow(),
+            state={"speaker": "judge"},
+        )
+        self.player = Player(id=2, game_id=1, user_id=10, name="Игрок", active=True)
+        self.court = SimpleNamespace(
+            username="court_bot",
+            player=AsyncMock(return_value=self.player),
+            hand_over=AsyncMock(),
+            cast_vote=AsyncMock(return_value="Голос записан: виновен."),
+            verdict=AsyncMock(),
+            objection=AsyncMock(),
+            leave=AsyncMock(),
+            send=AsyncMock(),
+            db=SimpleNamespace(get=AsyncMock(return_value=self.game)),
+        )
+
+    @staticmethod
+    def query(data, answer=None):
+        return SimpleNamespace(
+            data=data,
+            from_user=SimpleNamespace(id=10, full_name="Игрок"),
+            answer=answer or AsyncMock(),
+        )
+
+    async def test_pass_button_hands_the_word_over_with_a_toast(self):
+        query = self.query("pass:1")
+        await callback(query, self.court)
+        self.court.hand_over.assert_awaited_once_with(self.game, self.player)
+        query.answer.assert_awaited_once_with("Слово передано.", show_alert=False)
+
+    async def test_vote_button_stores_the_choice_without_revealing_it(self):
+        query = self.query("vote:1:guilty")
+        await callback(query, self.court)
+        self.court.cast_vote.assert_awaited_once_with(self.game, self.player, "guilty")
+        query.answer.assert_awaited_once_with("Голос записан: виновен.", show_alert=False)
+
+    async def test_judge_verdict_button_uses_the_same_service_call(self):
+        query = self.query("verdict:1:innocent")
+        await callback(query, self.court)
+        self.court.verdict.assert_awaited_once_with(
+            self.game, "innocent", by=self.player
+        )
+        query.answer.assert_awaited_once_with("Решение записано.", show_alert=False)
+
+    async def test_refused_action_is_explained_in_a_toast_alert(self):
+        self.court.cast_vote = AsyncMock(side_effect=ValueError("Голосует присяжный"))
+        query = self.query("vote:1:guilty")
+        await callback(query, self.court)
+        query.answer.assert_awaited_once_with("Голосует присяжный", show_alert=True)
+
+    async def test_an_expired_press_does_not_raise(self):
+        from aiogram.exceptions import TelegramBadRequest
+
+        query = self.query(
+            "pass:1",
+            answer=AsyncMock(
+                side_effect=TelegramBadRequest(method=None, message="query is too old")
+            ),
+        )
+        await callback(query, self.court)
+        self.court.hand_over.assert_awaited_once()
+
+    async def test_broken_button_data_is_ignored_gracefully(self):
+        for data in ("", "pass", "pass:abc", "vote:1", None):
+            query = self.query(data)
+            await callback(query, self.court)
+            self.assertTrue(query.answer.await_count >= 1, data)
+
+
+class WitnessCommandTests(unittest.IsolatedAsyncioTestCase):
+    """Calling a witness means an instant, addressed turn for that witness."""
+
+    def setUp(self):
+        self.game = Game(
+            id=1,
+            chat_id=-100,
+            title="Тестовый суд",
+            creator_id=10,
+            status="running",
+            phase="accusation",
+            deadline=utcnow(),
+            state={"speaker": "prosecutor"},
+        )
+        self.player = Player(id=2, game_id=1, user_id=10, name="Прокурор", active=True)
+        self.witness = Player(id=7, game_id=1, user_id=77, name="Свидетель", active=True)
+        self.role = Role(
+            id=3, game_id=1, code="prosecutor", title="Прокурор", side="prosecution"
+        )
+        self.witness_role = Role(
+            id=8, game_id=1, code="witness_1", title="Свидетель 1", side=None
+        )
+        self.court = SimpleNamespace(
+            username="court_bot",
+            active_game=AsyncMock(return_value=self.game),
+            player=AsyncMock(return_value=self.player),
+            role=AsyncMock(side_effect=self.role_for),
+            give_floor=AsyncMock(),
+            public=AsyncMock(),
+            record=AsyncMock(),
+            send=AsyncMock(),
+            cast_vote=AsyncMock(return_value="Голос записан: виновен."),
+            cmd=MagicMock(side_effect=lambda name, group=True: f"/{name}@court_bot"),
+            db=SimpleNamespace(
+                get=AsyncMock(return_value=self.witness),
+                scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [])),
+            ),
+        )
+
+    async def role_for(self, player):
+        return self.witness_role if player is self.witness else self.role
+
+    def message(self, text):
+        return SimpleNamespace(
+            text=text,
+            chat=SimpleNamespace(id=-100, type="supergroup", title="Тестовый суд"),
+            from_user=SimpleNamespace(id=10, full_name="Прокурор", is_bot=False),
+        )
+
+    async def test_call_gives_the_witness_the_floor_and_a_ping(self):
+        await handle(self.message("/call@court_bot 7"), self.court)
+        self.assertEqual(self.court.give_floor.await_args.args, (self.game, "witness_1"))
+        kwargs = self.court.give_floor.await_args.kwargs
+        self.assertEqual(kwargs["by"], self.role)
+        self.assertEqual(kwargs["delay"], 3)
+        self.assertEqual(kwargs["questioner"], "prosecutor")
+        self.assertFalse(kwargs["handover"])
+        self.assertIn("вызывает Свидетель 1", self.court.public.await_args.args[1])
+
+    async def test_question_records_the_question_and_passes_it_to_the_witness(self):
+        self.game.state["speaker"] = "witness_1"
+        await handle(self.message("/question@court_bot 7 Что вы видели?"), self.court)
+        self.assertIn("Что вы видели?", self.court.record.await_args.args[1])
+        self.assertEqual(
+            self.court.give_floor.await_args.kwargs["note"], "Вопрос: Что вы видели?"
+        )
+
+    async def test_question_without_a_text_still_asks_for_one(self):
+        self.game.state["speaker"] = "witness_1"
+        with self.assertRaisesRegex(ValueError, "ID вопрос"):
+            await handle(self.message("/question@court_bot 7"), self.court)
+        self.court.give_floor.assert_not_awaited()
+
+    async def test_judge_words_keep_the_questioner_empty(self):
+        self.role.code, self.role.title = "judge", "Судья"
+        await handle(self.message("/word@court_bot 7"), self.court)
+        self.assertEqual(self.court.give_floor.await_args.args, (self.game, "witness_1"))
+        self.assertEqual(self.court.give_floor.await_args.kwargs["questioner"], "")
+
+    async def test_vote_command_uses_the_shared_validator(self):
+        self.game.phase = "verdict"
+        self.role.code, self.role.title = "juror_1", "Присяжный 1"
+        await handle(self.message("/vote@court_bot guilty"), self.court)
+        self.assertEqual(self.court.send.await_args.args[1], self.court.cast_vote.return_value)
+
+if __name__ == "__main__":
+    unittest.main()

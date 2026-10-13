@@ -1,6 +1,7 @@
 import logging
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     BotCommand,
     BotCommandScopeAllGroupChats,
@@ -170,29 +171,50 @@ async def locate(court, message):
 
 @router.callback_query()
 async def callback(query: CallbackQuery, court: Court):
-    await query.answer()
+    # Button data is action:game[:choice]; the answer is a private toast, so a
+    # juror's choice is never echoed into the group.
+    action, gid, choice = ((query.data or "").split(":") + ["", ""])[:3]
+
+    async def toast(text, alert=False):
+        """Telegram answers a button once, and an expired press must not raise."""
+        try:
+            await query.answer((text or "")[:190], show_alert=alert)
+        except TelegramBadRequest:
+            pass
+
     try:
-        action, gid = (query.data or "").split(":")
         game = await court.db.get(Game, int(gid))
         if not game or game.status not in ("lobby", "running"):
             raise ValueError("Эта игра закрыта")
         p = await court.player(game, query.from_user.id)
+        message = ""
         if action == "leave":
             await court.leave(game, p)
-            await court.send(
-                query.from_user.id,
+            message = (
                 "Вы вышли из зала."
                 if game.status == "lobby"
-                else "Вас заменил бот навсегда.",
+                else "Вас заменил бот навсегда."
             )
+            await court.send(query.from_user.id, message)
+            message = "Готово"
         elif action == "object" and game.status == "running":
             await court.objection(game, p)
+            message = "Протест подан."
         elif action == "pass" and game.status == "running":
             # The player who holds the floor ends the turn instead of waiting
             # out the deadline; everyone else gets a local explanation.
             await court.hand_over(game, p)
+            message = "Слово передано."
+        elif action == "vote" and game.status == "running":
+            message = await court.cast_vote(game, p, choice)
+        elif action == "verdict" and game.status == "running":
+            # Only the judge may press this button; the service verifies it.
+            await court.verdict(game, choice, by=p)
+            message = "Решение записано."
+        await toast(message)
     except ValueError as exc:
-        await court.send(query.from_user.id, str(exc))
+        # A short toast is enough: the chat itself stays clean.
+        await toast(str(exc), alert=True)
 
 
 @router.message()
@@ -411,17 +433,7 @@ async def handle(m, c):
             await c.send(target.user_id, f"Зал {game.title}\n{content}")
         return await c.send(m.chat.id, "Сообщение передано.")
     if cmd == "/vote":
-        if (
-            game.phase != "verdict"
-            or not r.code.startswith("juror_")
-            or arg not in ("guilty", "innocent")
-        ):
-            raise ValueError(
-                "Присяжный голосует в фазе вердикта: "
-                f"{c.cmd('vote', group=m.chat.type != 'private')} guilty|innocent"
-            )
-        change(game, votes={**game.state.get("votes", {}), str(p.id): arg})
-        return await c.send(m.chat.id, "Голос записан.")
+        return await c.send(m.chat.id, await c.cast_vote(game, p, arg))
     if cmd == "/votes":
         if game.phase != "verdict":
             raise ValueError("Голосование присяжных идёт в фазе вердикта")
@@ -430,9 +442,7 @@ async def handle(m, c):
         # "Я всё сказал": the floor moves on at once, no waiting for the deadline.
         return await c.hand_over(game, p)
     if cmd == "/verdict":
-        if r.code != "judge":
-            raise ValueError("Вердикт выносит судья")
-        return await c.verdict(game, arg)
+        return await c.verdict(game, arg, by=p)
     # Other public procedural commands must not expose private text unexpectedly.
     if m.chat.type == "private":
         if cmd.startswith("/"):
@@ -458,8 +468,6 @@ async def handle(m, c):
         e.visible_to_roles = list(set(e.visible_to_roles + ["public"]))
         return await c.public(game, f"Приобщено: #{e.id} {e.title}: {e.content}")
     if cmd in ("/call", "/word", "/question"):
-        from datetime import timedelta
-
         args = arg.split(maxsplit=1)
         target = await c.db.get(Player, int(args[0]))
         tr = await c.role(target)
@@ -476,25 +484,33 @@ async def handle(m, c):
             or not tr.code.startswith("witness_")
         ):
             raise ValueError("Свидетеля вызывают судья, прокурор или адвокат")
+        question = args[1][:1500] if cmd == "/question" and len(args) > 1 else ""
         if cmd == "/question":
-            if game.state.get("speaker") != tr.code or len(args) < 2:
+            if game.state.get("speaker") != tr.code or not question:
                 raise ValueError(
                     "Сначала вызовите свидетеля: "
                     f"{c.cmd('call')} ID, затем {c.cmd('question')} ID вопрос"
                 )
             await c.record(
-                game, f"{r.title} спрашивает свидетеля: {args[1][:1500]}", ["public"], p
+                game, f"{r.title} спрашивает свидетеля: {question}", ["public"], p
             )
-        change(
+        if cmd == "/call":
+            await c.public(
+                game,
+                f"{r.title} вызывает {tr.title}."
+                + (f" Вопрос: {question}" if question else ""),
+            )
+        # The witness is pinged and, if it is a human, gets the «я всё» button
+        # right away; a bot witness answers a few seconds later on its own.
+        return await c.give_floor(
             game,
-            speaker=tr.code,
-            questioner=r.code if r.code != "judge" else None,
-            last_activity=utcnow().isoformat(),
-            silence=0,
-            bot_spoken=False,
-            bot_due=(utcnow() + timedelta(seconds=3)).isoformat(),
+            tr.code,
+            by=r,
+            note=f"Вопрос: {question}" if question else "",
+            delay=3,
+            questioner=r.code if r.code != "judge" else "",
+            handover=False,
         )
-        return await c.public(game, f"Слово предоставлено: {tr.title}.")
     if cmd == "/next":
         if r.code != "judge" or game.phase in ("final", "verdict"):
             raise ValueError(

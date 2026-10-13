@@ -516,6 +516,18 @@ class Court:
         if phase in HANDOVER_PHASES or phase == "final":
             rows.append([("🗣 Я всё, передать слово", f"pass:{game.id}")])
         rows.append([("Протестую!", f"object:{game.id}")])
+        if phase == "verdict":
+            # Voting by button: the choice is stored silently, the toast is private.
+            rows += [
+                [
+                    ("🗳 Виновен", f"vote:{game.id}:guilty"),
+                    ("🗳 Невиновен", f"vote:{game.id}:innocent"),
+                ],
+                [
+                    ("⚖️ Судья: виновен", f"verdict:{game.id}:guilty"),
+                    ("⚖️ Судья: невиновен", f"verdict:{game.id}:innocent"),
+                ],
+            ]
         hint = (
             " Закончили — напишите «я всё» или нажмите кнопку."
             if phase in HANDOVER_PHASES
@@ -745,35 +757,53 @@ class Court:
         change(game, **self.turn_state(game, code))
         await self.public(game, f"Слово передано: {code}.")
 
-    async def give_floor(self, game, code, *, by=None, note=""):
+    def turn_keyboard(self, game):
+        """The speaker's own buttons: finish the turn, protest."""
+        return keyboard(
+            [("🗣 Я всё, передать слово", f"pass:{game.id}")],
+            [("Протестую!", f"object:{game.id}")],
+        )
+
+    async def give_floor(
+        self,
+        game,
+        code,
+        *,
+        by=None,
+        note="",
+        delay=BOT_TURN_DELAY,
+        questioner=None,
+        handover=True,
+    ):
         """Hand the floor to another role inside the running phase, at once.
 
         Unlike the deadline, this is instant: the receiver is mentioned in the
-        group so the turn does not sit unnoticed, its own timers restart, and a
-        human receiver also gets the «я всё» button right in that message.
+        group so the turn does not sit unnoticed, its own timers restart (a bot
+        answers after ``delay`` seconds), and a human receiver also gets the
+        «я всё» button right in that message. ``handover=False`` skips the
+        rate-limit stamp of a mutual handover: calling a witness is not one.
         """
         target = await self.by_code(game, code)
         if not target or not target.active:
             raise ValueError("Некуда передавать слово: этой роли нет в игре")
         title = (await self.role(target)).title
-        change(
-            game,
-            **self.turn_state(game, code),
-            last_handover=utcnow().isoformat(),
-        )
+        change(game, **self.turn_state(game, code, delay=delay))
+        if questioner is not None:
+            change(game, questioner=questioner or None)
+        if handover:
+            change(game, last_handover=utcnow().isoformat())
         left = max(0, int((game.deadline - utcnow()).total_seconds()))
         message = self.mention(target, title)
         text = f"🗣 {by.title if by else 'Судья'} передаёт слово: {message}. Осталось {left} сек."
+        if note:
+            text += f"\n{note}"
         markup = None
         if not target.is_bot:
             text += "\nВам дано слово. Закончили — напишите «я всё» или нажмите кнопку."
-            markup = keyboard(
-                [("🗣 Я всё, передать слово", f"pass:{game.id}")],
-                [("Протестую!", f"object:{game.id}")],
-            )
+            markup = self.turn_keyboard(game)
         await self.public(
             game,
-            text + (f" {note}" if note else ""),
+            text,
             memory=f"🗣 Слово передано: {title}.",
             reply_markup=markup,
             **({"parse_mode": "HTML"} if message != title else {}),
@@ -799,10 +829,13 @@ class Court:
         if not role:
             raise ValueError("Сначала получите роль в начавшейся игре")
         if game.phase in ("crime", "verdict"):
-            raise ValueError(
-                "В этой фазе ход ведёт суд: "
-                f"{self.cmd('votes')} покажет голоса, {self.cmd('players')} — состав"
+            # Both phases run on the court's clock: nobody holds a personal turn.
+            hint = (
+                f"{self.cmd('next')} завершит эту фазу досрочно"
+                if game.phase == "crime"
+                else f"голоса собираются кнопками, {self.cmd('votes')} покажет, кого ждут"
             )
+            raise ValueError(f"В этой фазе личного слова нет: {hint}")
         if role.code == "judge":
             if game.phase in ("final", "verdict"):
                 raise ValueError(
@@ -844,6 +877,24 @@ class Court:
             return await self.set_phase(game, value)
         await self.give_floor(game, value, by=role)
 
+    async def cast_vote(self, game, p, choice):
+        """Record a juror's vote; the choice itself is never echoed publicly."""
+        if game.status != "running" or game.phase != "verdict":
+            raise ValueError("Голосование присяжных идёт в фазе вердикта")
+        role = await self.role(p)
+        if not p or not p.active or not role or not role.code.startswith("juror_"):
+            raise ValueError("Голосует присяжный этой игры")
+        if choice not in ("guilty", "innocent"):
+            raise ValueError("Выбор: guilty или innocent")
+        previous = game.state.get("votes", {}).get(str(p.id))
+        change(game, votes={**game.state.get("votes", {}), str(p.id): choice})
+        label = "виновен" if choice == "guilty" else "невиновен"
+        return (
+            f"Ваш голос изменён: {label}."
+            if previous
+            else f"Голос записан: {label}. Выбор останется тайным до вердикта."
+        )
+
     async def vote_summary(self, game):
         jury = list(
             (
@@ -866,6 +917,8 @@ class Court:
     async def vote_progress(self, game):
         """Who has already voted — the choices stay secret until the finish."""
         jury, votes, complete, _ = await self.vote_summary(game)
+        if not jury:
+            return "🗳 Присяжных в этой игре нет: решение за судьёй."
         voted = [p for p in jury if str(p.id) in votes]
         waiting = [p for p in jury if str(p.id) not in votes]
         lines = [f"🗳 Голоса присяжных: {len(voted)} из {len(jury)}."]
@@ -881,9 +934,14 @@ class Court:
         )
         return "\n".join(lines)
 
-    async def verdict(self, game, result):
+    async def verdict(self, game, result, *, by=None):
+        """The judge's decision. ``by`` is checked when a person or a button asks."""
         if game.phase != "verdict" or result not in ("guilty", "innocent"):
             raise ValueError("Вердикт доступен в финальной фазе: guilty / innocent")
+        if by is not None:
+            role = await self.role(by)
+            if not role or role.code != "judge":
+                raise ValueError("Вердикт выносит судья")
         _jury, votes, complete, unanimous = await self.vote_summary(game)
         if not complete and (game.deadline - utcnow()).total_seconds() > 30:
             change(game, judge_verdict=result)
@@ -959,9 +1017,14 @@ class Court:
         await self.send(game.chat_id, f"🤖 {role.title}: {text}")
         change(game, last_activity=utcnow().isoformat(), bot_spoken=True)
         if role.code.startswith("witness_"):
-            # Return to the questioning side after a bot witness answers.
+            # Return to the questioning side after a bot witness answers: the
+            # questioner may ask again or finish, so the button comes along.
             code = game.state.get("questioner") or SPEAKERS[game.phase]
-            change(game, **self.turn_state(game, code, delay=20))
+            try:
+                await self.give_floor(game, code, by=role, delay=20, handover=False)
+            except ValueError:
+                # The questioner left the game: fall back to the plain turn.
+                change(game, **self.turn_state(game, code, delay=20))
             return
         if role.code in ("prosecutor", "defense") and game.phase in (
             "accusation",
@@ -1056,14 +1119,14 @@ class Court:
                     await self.public(
                         game, f"🤖 {role.title} вызывает {r.title}. Вопрос: {question}"
                     )
-                    change(
+                    # The call message above already carries the question.
+                    await self.give_floor(
                         game,
+                        r.code,
+                        by=role,
+                        delay=5,
                         questioner=role.code,
-                        speaker=r.code,
-                        silence=0,
-                        last_activity=utcnow().isoformat(),
-                        bot_spoken=False,
-                        bot_due=(utcnow() + timedelta(seconds=5)).isoformat(),
+                        handover=False,
                     )
             elif kind == "object":
                 # The procedural engine permits AI parties, but requires a prior statement.
